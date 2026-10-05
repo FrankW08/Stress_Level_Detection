@@ -353,6 +353,10 @@ def paired_comparison(
         "t_crit": t_crit,
         "approx_ci95": [float(d.mean() - t_crit * se), float(d.mean() + t_crit * se)],
         "share_of_folds_a_higher_descriptive": float((d > 0).mean()),
+        "interpretation": (
+            "Approximate corrected interval over repeated-CV folds (folds are not "
+            "independent). An interval containing 0 does not establish equivalence."
+        ),
     }
 
 

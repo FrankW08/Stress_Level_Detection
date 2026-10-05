@@ -12,7 +12,13 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from stress_detection.audit import run_full_audit  # noqa: E402
+from stress_detection.audit import PERSISTENT_ERROR_THRESHOLD, run_full_audit  # noqa: E402
+from stress_detection.hashes import sha256_file_normalized_lf  # noqa: E402
+from stress_detection.run_config import (  # noqa: E402
+    ConfigError,
+    resolve_eval_settings,
+    validate_file_config,
+)
 
 
 def _load_yaml_config(path: Path) -> dict[str, Any]:
@@ -95,7 +101,19 @@ def main() -> int:
         "--smoke",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Fast smoke run (3x1 CV, 5 perms)",
+        help="Fast smoke run (3x1 CV unless --n-splits/--n-repeats given, 5 perms)",
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=None,
+        help="Outer CV folds (overrides config eval.n_splits and smoke default)",
+    )
+    parser.add_argument(
+        "--n-repeats",
+        type=int,
+        default=None,
+        help="Outer CV repeats (overrides config eval.n_repeats and smoke default)",
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed for CV / RF / perms")
     parser.add_argument(
@@ -113,10 +131,21 @@ def main() -> int:
     args = parser.parse_args()
 
     file_cfg: dict[str, Any] = {}
+    config_info: dict[str, Any] = {"path": None, "sha256_normalized_lf": None}
     if args.config is not None:
-        file_cfg = _load_yaml_config(args.config.resolve())
+        config_path = args.config.resolve()
+        file_cfg = _load_yaml_config(config_path)
+        config_info = {
+            "path": args.config.as_posix(),
+            "sha256_normalized_lf": sha256_file_normalized_lf(config_path),
+        }
 
-    eval_cfg = file_cfg.get("eval", {}) if isinstance(file_cfg.get("eval"), dict) else {}
+    try:
+        eval_cfg = validate_file_config(
+            file_cfg, persistent_error_threshold=PERSISTENT_ERROR_THRESHOLD
+        )
+    except ConfigError as exc:
+        parser.error(f"invalid config: {exc}")
 
     def pick(cli_val: Any, *keys: str, default: Any) -> Any:
         if cli_val is not None:
@@ -140,6 +169,20 @@ def main() -> int:
     )
     tail_q = int(file_cfg.get("tail_quarantine_from", 1100))
 
+    if not isinstance(smoke, bool):
+        parser.error(f"invalid config: smoke must be true/false, got {smoke!r}")
+    try:
+        eval_settings = resolve_eval_settings(
+            smoke=smoke,
+            cli_n_splits=args.n_splits,
+            cli_n_repeats=args.n_repeats,
+            file_eval=eval_cfg,
+        )
+    except ConfigError as exc:
+        parser.error(str(exc))
+    for note in eval_settings["notes"]:
+        print(f"note: {note}", file=sys.stderr)
+
     csv_path = args.csv.resolve()
     out_dir = args.out_dir.resolve()  # exact path; no automatic _smoke suffix
 
@@ -148,12 +191,19 @@ def main() -> int:
         out_dir,
         scope=scope,
         n_perm=n_perm,
-        smoke=bool(smoke),
+        smoke=smoke,
         seed=seed,
         project_root=ROOT,
         tail_quarantine_from=tail_q,
         near_dup_row_limit=near_dup,
         sensitivity_policy=sensitivity_policy,
+        n_splits=eval_settings["n_splits"],
+        n_repeats=eval_settings["n_repeats"],
+        settings_resolution={
+            "config_file": config_info,
+            "eval_sources": eval_settings["sources"],
+            "eval_notes": eval_settings["notes"],
+        },
     )
     keys = ("run_mode", "config", "models", "paired", "permutation", "sensitivity")
     print(json.dumps({k: results[k] for k in keys if k in results}, indent=2))

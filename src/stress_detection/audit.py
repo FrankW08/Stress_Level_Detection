@@ -44,6 +44,7 @@ from stress_detection.models import (
     svm_linear_pipeline,
     tree_depth3_pipeline,
 )
+from stress_detection.run_config import resolve_eval_settings
 
 CORE_MODELS = ["lr_all", "rf_all", "svm_all", "nested_single"]
 PERSISTENT_ERROR_THRESHOLD = 0.8
@@ -234,6 +235,7 @@ def run_full_audit(
     run_generalization: bool = True,
     n_splits: int | None = None,
     n_repeats: int | None = None,
+    settings_resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # Capture git state before creating or writing any output, so artifacts written
     # under the repository do not make a clean starting tree look dirty.
@@ -241,15 +243,19 @@ def run_full_audit(
     git_start = git_info(project_root)
     git_start["git_state_capture"] = "run_start"
 
+    eval_settings = resolve_eval_settings(
+        smoke=smoke, cli_n_splits=n_splits, cli_n_repeats=n_repeats, file_eval={}
+    )
+    resolution = dict(settings_resolution or {"eval_sources": eval_settings["sources"]})
+    cfg = EvalConfig(
+        n_repeats=eval_settings["n_repeats"],
+        n_splits=eval_settings["n_splits"],
+        seed=int(seed),
+    )
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = Path(csv_path).resolve()
-
-    cfg = EvalConfig(
-        n_repeats=n_repeats if n_repeats is not None else (1 if smoke else 10),
-        n_splits=n_splits if n_splits is not None else (3 if smoke else 5),
-        seed=int(seed),
-    )
     n_perm = 5 if smoke else n_perm
 
     raw = load_raw_csv(csv_path)
@@ -307,6 +313,11 @@ def run_full_audit(
 
     cv_out: dict[str, Any] | None = None
     if run_generalization:
+        min_class = int(np.bincount(y).min())
+        if cfg.n_splits > min_class:
+            raise ValueError(
+                f"n_splits={cfg.n_splits} exceeds the smallest class count ({min_class})"
+            )
         cv_out = run_audit_cv(
             X, y, prep.source_row_ids, models, cfg, groups=groups
         )
@@ -415,6 +426,7 @@ def run_full_audit(
         "config": {
             "scope": scope,
             "eval": cfg.__dict__,
+            "settings_resolution": resolution,
             "n_perm": n_perm,
             "seed": cfg.seed,
             "persistent_error_threshold": PERSISTENT_ERROR_THRESHOLD,
