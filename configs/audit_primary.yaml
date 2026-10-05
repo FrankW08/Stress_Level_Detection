@@ -1,0 +1,9 @@
+# Experiment A — fixed-parameter audit (matches audit_repro v2 intent)
+scope: primary
+tail_quarantine_from: 1100
+eval:
+  n_splits: 5
+  n_repeats: 10
+  seed: 0
+n_perm: 100
+persistent_error_threshold: 0.8
