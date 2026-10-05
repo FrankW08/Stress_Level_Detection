@@ -107,34 +107,137 @@ def _fold_row_from_metrics(
     return row
 
 
+SUMMARY_METRIC_COLS = [
+    "macro_f1",
+    "accuracy",
+    "cross_level_0_2_rate",
+    "class_0_precision",
+    "class_0_recall",
+    "class_0_f1",
+    "class_1_precision",
+    "class_1_recall",
+    "class_1_f1",
+    "class_2_precision",
+    "class_2_recall",
+    "class_2_f1",
+]
+
+FOLD_AGGREGATION = {
+    "unit": "outer_fold",
+    "definition": (
+        "Each metric is computed on one outer validation fold; *_mean / *_std are "
+        "taken over all outer folds (n_splits x n_repeats), std with ddof=1. "
+        "Fold std describes fold-to-fold score variation on this fixed dataset."
+    ),
+    "confusion_matrix_sum": (
+        "Sum of per-fold confusion matrices over all folds of all repeats; each "
+        "included sample is counted once per repeat (n_repeats times in total), "
+        "so the total is not a count of independent samples."
+    ),
+}
+
+REPEAT_AGGREGATION = {
+    "unit": "repeat",
+    "definition": (
+        "For each repeat, predictions from all outer validation folds are merged by "
+        "source_row_id into one complete out-of-fold (OOF) vector covering every "
+        "included sample exactly once; metrics (including macro-F1) are recomputed "
+        "from that pooled vector. *.mean / *.std are taken over repeats, std with ddof=1."
+    ),
+    "interpretation": (
+        "Repeat std describes variation due to the random partition on the same "
+        "fixed dataset. Repeats reuse the same data and are not independent samples "
+        "of new datasets; neither repeat std nor fold std is a confidence interval "
+        "for external generalization."
+    ),
+    "confusion_matrix_sum_over_repeats": (
+        "Sum of per-repeat OOF confusion matrices; each included sample is counted "
+        "n_repeats times, so the total is not a count of independent samples."
+    ),
+}
+
+
 def summarize_fold_scores(fs: pd.DataFrame) -> dict[str, Any]:
     summary: dict[str, Any] = {}
-    metric_cols = [
-        "macro_f1",
-        "accuracy",
-        "cross_level_0_2_rate",
-        "class_0_precision",
-        "class_0_recall",
-        "class_0_f1",
-        "class_1_precision",
-        "class_1_recall",
-        "class_1_f1",
-        "class_2_precision",
-        "class_2_recall",
-        "class_2_f1",
-    ]
     for name, g in fs.groupby("model"):
-        entry: dict[str, Any] = {}
-        for col in metric_cols:
+        entry: dict[str, Any] = {"aggregation_unit": "outer_fold", "n_folds": int(len(g))}
+        for col in SUMMARY_METRIC_COLS:
             if col not in g.columns:
                 continue
             s = g[col].astype(float)
             entry[f"{col}_mean"] = float(s.mean())
             entry[f"{col}_std"] = float(s.std(ddof=1)) if len(s) > 1 else 0.0
-        # Aggregate confusion matrices across folds
         cms = [np.array(m) for m in g["confusion_matrix"].tolist()]
         entry["confusion_matrix_sum"] = np.sum(cms, axis=0).astype(int).tolist()
+        entry["confusion_matrix_sum_unit"] = (
+            "sum over all outer folds; each sample counted once per repeat"
+        )
         entry["confusion_matrix_per_fold"] = g["confusion_matrix"].tolist()
+        summary[name] = entry
+    return summary
+
+
+def repeat_oof_scores(
+    oof: dict[str, np.ndarray],
+    y: np.ndarray,
+) -> pd.DataFrame:
+    """One row per model x repeat, computed from the pooled OOF predictions of that repeat."""
+    rows: list[dict[str, Any]] = []
+    for name, arr in oof.items():
+        for rep in range(arr.shape[0]):
+            pred = arr[rep]
+            if (pred < 0).any():
+                missing = int((pred < 0).sum())
+                raise ValueError(
+                    f"{name} repeat {rep}: {missing} samples have no OOF prediction"
+                )
+            metrics = per_class_metrics(y, pred)
+            row: dict[str, Any] = {
+                "model": name,
+                "repeat": rep,
+                "n_samples": int(len(y)),
+                "macro_f1": metrics["macro_f1"],
+                "accuracy": metrics["accuracy"],
+                "cross_level_0_2_numerator": metrics["cross_level_0_2"]["numerator"],
+                "cross_level_0_2_denominator": metrics["cross_level_0_2"]["denominator"],
+                "cross_level_0_2_rate": metrics["cross_level_0_2"]["rate"],
+                "confusion_matrix": metrics["confusion_matrix"],
+            }
+            for lab in ("0", "1", "2"):
+                for k in ("precision", "recall", "f1", "support"):
+                    row[f"class_{lab}_{k}"] = metrics[lab][k]
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def summarize_repeat_scores(rs: pd.DataFrame) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for name, g in rs.groupby("model", sort=False):
+        g = g.sort_values("repeat")
+        n = int(len(g))
+        metrics: dict[str, Any] = {}
+        for col in SUMMARY_METRIC_COLS:
+            s = g[col].astype(float)
+            metrics[col] = {
+                "mean": float(s.mean()),
+                "std": float(s.std(ddof=1)) if n > 1 else None,
+            }
+        cms = [np.array(m) for m in g["confusion_matrix"].tolist()]
+        entry: dict[str, Any] = {
+            "aggregation_unit": "repeat",
+            "n_repeats": n,
+            "metrics": metrics,
+            "confusion_matrix_label_order": [0, 1, 2],
+            "confusion_matrix_per_repeat": g["confusion_matrix"].tolist(),
+            "confusion_matrix_sum_over_repeats": np.sum(cms, axis=0).astype(int).tolist(),
+            "confusion_matrix_sum_unit": (
+                f"sum over {n} repeats; each sample counted {n} times"
+            ),
+        }
+        if n <= 1:
+            entry["std_note"] = (
+                "Only one repeat: across-repeat standard deviation cannot be estimated."
+            )
         summary[name] = entry
     return summary
 
@@ -206,9 +309,11 @@ def run_audit_cv(
                     )
 
     fs = pd.DataFrame(fold_rows)
-    # Drop nested list column from CSV-friendly copy later; keep in memory
+    rs = repeat_oof_scores(oof, y)
     return {
         "fold_scores": fs,
+        "repeat_scores": rs,
+        "repeat_summary": summarize_repeat_scores(rs),
         "inner_candidates": pd.DataFrame(inner_rows),
         "folds": pd.DataFrame(fold_membership),
         "oof": oof,

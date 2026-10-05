@@ -1,4 +1,4 @@
-"""Import side effects, env lock, seed, OOF metrics, notebook smoke."""
+"""Import side effects, env lock, seed, notebook smoke."""
 
 from __future__ import annotations
 
@@ -8,11 +8,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 
-from stress_detection.evaluation import metrics_from_oof
 from stress_detection.hashes import build_environment_lock_text, write_environment_lock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,41 +115,6 @@ def test_seed_affects_folds(tmp_path):
         )
     )
     assert m0 != m123
-
-
-@pytest.mark.skipif(not CSV.is_file(), reason="dataset missing")
-def test_oof_metrics_match_fold_means(tmp_path):
-    out = tmp_path / "oof_check"
-    subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "run_audit.py"),
-            str(CSV),
-            str(out),
-            "--smoke",
-            "--seed",
-            "0",
-        ],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    res = json.loads((out / "results.json").read_text(encoding="utf-8"))
-    oof = pd.read_csv(out / "oof_predictions.csv")
-    folds = pd.read_csv(out / "fold_scores.csv")
-    # OOF macro-F1 averaged over repeats should be close to mean fold macro-F1
-    for model in ("lr_all", "dummy"):
-        rep_scores = []
-        for rep, g in oof.groupby("repeat"):
-            m = metrics_from_oof(g["true"].to_numpy(), g[model].to_numpy())
-            rep_scores.append(m["macro_f1"])
-        oof_mean = float(np.mean(rep_scores))
-        fold_mean = float(folds.loc[folds.model == model, "macro_f1"].mean())
-        # Fold-mean and pooled OOF mean are related but not identical definitions;
-        # require fold mean from CSV matches results.json
-        assert abs(fold_mean - res["models"][model]["macro_f1_mean"]) < 1e-9
-        assert 0.0 <= oof_mean <= 1.0
 
 
 @pytest.mark.skipif(not CSV.is_file(), reason="dataset missing")

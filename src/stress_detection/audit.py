@@ -27,6 +27,8 @@ from stress_detection.data import (
     prepare_data,
 )
 from stress_detection.evaluation import (
+    FOLD_AGGREGATION,
+    REPEAT_AGGREGATION,
     EvalConfig,
     paired_comparison,
     run_audit_cv,
@@ -173,24 +175,39 @@ def describe_persistent_flags(X: pd.DataFrame, flag: np.ndarray, seed: int) -> d
 
 
 def git_info(project_root: Path) -> dict[str, Any]:
+    """
+    Snapshot of HEAD and working-tree state. `dirty` counts modified tracked files
+    and untracked (non-ignored) files. If git cannot be queried, commit/dirty are
+    "unknown" and available=False; this is never reported as clean.
+    """
+    def _git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        ).stdout
+
     try:
-        commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        return {"commit": commit, "dirty": bool(dirty)}
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return {"commit": "unknown", "dirty": "unknown"}
+        commit = _git("rev-parse", "HEAD").strip()
+        status = _git("status", "--porcelain", "--untracked-files=normal")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        detail = getattr(exc, "stderr", None) or str(exc)
+        return {
+            "commit": "unknown",
+            "dirty": "unknown",
+            "available": False,
+            "error": str(detail).strip()[:500],
+        }
+    lines = [ln for ln in status.splitlines() if ln.strip()]
+    return {
+        "commit": commit,
+        "dirty": bool(lines),
+        "available": True,
+        "n_status_entries": len(lines),
+    }
 
 
 def _fold_scores_for_csv(fs: pd.DataFrame) -> pd.DataFrame:
@@ -215,15 +232,22 @@ def run_full_audit(
     near_dup_row_limit: int = 1100,
     sensitivity_policy: SensitivityPolicy = "raw",
     run_generalization: bool = True,
+    n_splits: int | None = None,
+    n_repeats: int | None = None,
 ) -> dict[str, Any]:
+    # Capture git state before creating or writing any output, so artifacts written
+    # under the repository do not make a clean starting tree look dirty.
+    project_root = Path(project_root or Path(__file__).resolve().parents[2]).resolve()
+    git_start = git_info(project_root)
+    git_start["git_state_capture"] = "run_start"
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    project_root = project_root or Path(__file__).resolve().parents[2]
     csv_path = Path(csv_path).resolve()
 
     cfg = EvalConfig(
-        n_repeats=1 if smoke else 10,
-        n_splits=3 if smoke else 5,
+        n_repeats=n_repeats if n_repeats is not None else (1 if smoke else 10),
+        n_splits=n_splits if n_splits is not None else (3 if smoke else 5),
         seed=int(seed),
     )
     n_perm = 5 if smoke else n_perm
@@ -310,6 +334,9 @@ def run_full_audit(
         _fold_scores_for_csv(cv_out["fold_scores"]).to_csv(
             out_dir / "fold_scores.csv", index=False, encoding="utf-8"
         )
+        _fold_scores_for_csv(cv_out["repeat_scores"]).to_csv(
+            out_dir / "repeat_scores.csv", index=False, encoding="utf-8"
+        )
         cv_out["inner_candidates"].to_csv(
             out_dir / "inner_candidates.csv", index=False, encoding="utf-8"
         )
@@ -384,7 +411,7 @@ def run_full_audit(
     results: dict[str, Any] = {
         "run_mode": "smoke" if smoke else "full",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "git": git_info(project_root),
+        "git": git_start,
         "config": {
             "scope": scope,
             "eval": cfg.__dict__,
@@ -417,7 +444,10 @@ def run_full_audit(
             "rule": "primary: rows 0-1099 + valid labels; sensitivity: policy-dependent",
         },
         "sensitivity": sensitivity_notes,
+        "models_aggregation": FOLD_AGGREGATION,
         "models": cv_out["summary"] if cv_out else {},
+        "models_repeat_aggregation": REPEAT_AGGREGATION,
+        "models_repeat": cv_out["repeat_summary"] if cv_out else {},
         "model_params": cv_out["model_params"] if cv_out else {},
         "nested_single_feature_picks": (
             cv_out["fold_scores"]
