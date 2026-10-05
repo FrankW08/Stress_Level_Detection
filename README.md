@@ -6,95 +6,93 @@ Multiclass classification of student **stress_level** (0 / 1 / 2) from questionn
 
 - **Primary question:** How well do standard models predict `stress_level` under nested preprocessing and fixed audit protocols?
 - **Not claimed:** causal effects, synthetic-data status, theoretical performance ceiling, or external validity.
-- **Invalid historical scores:** Notebook **~94% SVM** used **label-driven zero imputation** and other leakage; **~88% LR** from the old notebook is **not** a verified benchmark.
+- **Invalid historical scores:** Old Notebook SVM figures near **94%** used **label-driven zero imputation** and other leakage; old LR figures near **88%** are **not** verified benchmarks.
 
-## Data
+## Data and line endings
 
 - Source file: `StressLevelDataset_original.csv` (1121 rows; **never overwrite**).
-- **SHA-256 (local run, 2026-10-05):** `4fc99679af3bffc701129d09ed072bfbce79070073a2d5da55aff00b7eb50473`  
-  If this differs from another environment, compare file bytes and git revision before comparing metrics.
-- **Primary scope:** `source_row_id` 0–1099, valid labels only → **1098 rows** (21 tail rows quarantined by audit convention; 2 missing labels).
-- **Sensitivity scope:** all rows with valid labels (`--scope sensitivity`) — configured but not run in the default full audit below.
-- See `DATA_CARD.md` for provisional schema notes.
+- Git stores the CSV with **LF** newlines. With `core.autocrlf=true` on Windows, a checkout may use **CRLF** bytes on disk.
+  - **Normalized-LF SHA-256** (content after CRLF→LF): `05145e0a27395e85f6ed062d6f89f99351bdd16f8fa7dc5e60243bd1083dab26`
+  - **Raw checkout SHA-256** may be `4fc99679…` on Windows CRLF checkouts — **same records**, different newline bytes.
+- Each `results.json` records both `csv_sha256_raw` and `csv_sha256_normalized_lf`.
+- **Primary scope:** `source_row_id` 0–1099, valid labels only → **1098 rows**.
+- **Sensitivity scope:** `--scope sensitivity` with `--sensitivity-policy` (`raw` | `quarantine_out_of_range` | `grouped_duplicates`). Provisional range bounds are **not** a confirmed data dictionary.
+- See `DATA_CARD.md`.
 
 ## Install
 
 ```bash
 cd Stress_Level_Detection
-python -m pip install -e ".[dev]"
+# Recommended
+uv sync --extra dev --extra benchmark
+# Or
+python -m pip install -e ".[dev,benchmark]"
 ```
+
+`uv.lock` pins the environment when using uv.
 
 ## Tests
 
 ```bash
-python -m pytest tests -q
+python -m pytest -q
 ```
 
-## Smoke vs full audit (experiment A)
+Tests write only under pytest `tmp_path` (no new files under `results/`).
 
-Fixed-parameter models, shared **RepeatedStratifiedKFold 5×10, seed=0**, macro-F1 primary metric. Pipelines impute/scale **inside training folds only**.
+## Smoke vs full audit (Experiment A)
+
+Fixed-parameter models, shared **RepeatedStratifiedKFold** (default 5×10, `--seed` default 0), primary metric **macro-F1**. Pipelines impute/scale **inside training folds only**.
 
 ```bash
-# Smoke (~seconds): 3 folds × 1 repeat, 5 permutations
-python scripts/run_audit.py StressLevelDataset_original.csv results/audit_smoke --smoke
+# Smoke — output directory is used exactly as given
+python scripts/run_audit.py StressLevelDataset_original.csv /tmp/audit_smoke --smoke --config configs/audit_primary.yaml
 
-# Full (tens of seconds on this machine): 50 outer folds, 100 permutations
-python scripts/run_audit.py StressLevelDataset_original.csv results/audit_full --n-perm 100
+# Seed check
+python scripts/run_audit.py StressLevelDataset_original.csv /tmp/audit_seed123 --smoke --seed 123
+
+# Sensitivity smoke (group-aware duplicates)
+python scripts/run_audit.py StressLevelDataset_original.csv /tmp/audit_sens --smoke --scope sensitivity --sensitivity-policy grouped_duplicates
+
+# Full (after a clean commit; write to a NEW directory — do not overwrite results/audit_full)
+python scripts/run_audit.py StressLevelDataset_original.csv results/audit_full_clean_COMMIT --n-perm 100 --seed 0 --config configs/audit_primary.yaml
 ```
 
-Outputs under the chosen directory: `results.json`, `folds.csv`, `fold_scores.csv`, `inner_candidates.csv`, `oof_predictions.csv`, `permutations.csv`, `per_sample_errors.csv`, `exclusions.csv`, `field_checks.csv`, `parse_issues.csv`, duplicate audit CSVs, `requirements-lock.txt`.
+CLI flags override `--config` YAML. Outputs: `results.json`, folds, OOF, permutations, parse_issues, requirements-lock (non-empty), hashes for lock + code manifest.
 
-**Experiment B** (nested hyperparameter benchmark for LR/SVM/RF/XGB): stub status in `scripts/run_benchmark.py` — not completed this round.
+**Experiment B** (nested LR/SVM/RF/XGB search): still a **stub** in `scripts/run_benchmark.py` — not completed.
 
-## Actual full audit results (this workspace)
+## Historical full audit (`results/audit_full`)
 
-Environment: Python **3.12.5**, pandas **2.2.3**, scikit-learn **1.7.0**, numpy **2.2.6**, scipy **1.15.3**. Git: `cd80fc1` (**dirty** after local changes).
+The committed tree under `results/audit_full/` is **historical evidence** produced from git commit `cd80fc1` with a **dirty** working tree (pre-`5ee2152` packaging). Do **not** treat its `env.script_sha256` as a full code manifest.
 
-| Model | macro-F1 (mean ± std, 50 outer folds) |
-|--------|----------------------------------------|
-| Dummy (most frequent) | 0.169 (no std — constant) |
+| Model | macro-F1 (mean ± std, 50 outer folds, seed=0) |
+|--------|-----------------------------------------------|
+| Dummy (most frequent) | 0.169 |
 | LR, all features | **0.886 ± 0.017** |
 | Linear SVM, C=0.2 | 0.878 ± 0.017 |
 | Random Forest | 0.878 ± 0.020 |
 | LR, no 4 psych features | 0.883 ± 0.019 |
 | Nested single-feature tree (depth 3) | 0.872 ± 0.020 |
 
-Nested single-feature picks: `blood_pressure` 33, `future_career_concerns` 11, `anxiety_level` 3, `sleep_quality` 3 (50 folds).
+After landing this code on a **clean** commit, regenerate a new full audit into a **new** directory and compare macro-F1 to the table above (float noise only expected for seed=0 primary).
 
-**Paired macro-F1 differences (LR_all − other), Nadeau–Bengio-style approx. 95% CI, df=49:**
+## Leakage controls
 
-| Comparison | Mean Δ | Approx. CI | Share folds LR higher |
-|------------|--------|------------|------------------------|
-| LR − nested single | +0.013 | [−0.002, +0.028] | 82% |
-| LR − RF | +0.008 | [−0.006, +0.022] | 70% |
-| LR − no psych | +0.003 | [−0.009, +0.014] | 60% |
-
-**Permutation (label shuffling, SVM C=0.2):** observed clean **0.877**, leaky (label-zero map) **0.932**; paired null Δ mean **0.040** (see `permutations.csv`). **96%** of permutations had leaky > clean.
-
-These numbers align with the second-version reference script (`audit_repro.py` / `new_README.md`) up to minor float formatting; **CSV hash in that document (`05145e0a…`) does not match this file** — treat attachment numbers as same protocol, different byte identity until the CSV is reconciled.
-
-## Leakage fixes
-
-- Removed default **label-driven zero replacement** in the notebook (`RUN_LEAKY_SVM_DEMO = False`); audit-only path in `stress_detection.data.LEAK_MAP`.
-- Training uses **sklearn Pipelines** (median impute + scale + model for LR/SVM).
-- **`stress_level` never enters features**; validation predictions do not take `y_valid`.
-- Tests: `tests/test_validation.py`, `tests/test_model_persistence.py`.
+- Default paths **never** apply label-driven zero replacement; audit-only helper: `stress_detection.data.apply_label_driven_zero_map`.
+- Label-invariance tests: clean adapter ignores `y_valid`; deliberate leaky adapter must fail.
+- `stress_level` is never a feature; production predict takes `X` only.
 
 ## Notebook
 
-`Stress Level Classification.ipynb` — EDA and legacy model cells retained with fixes (variable names, `fillna` assignment, classification report class keys, EDA bins, leakage guard). **Authoritative metrics:** last cell calls `run_audit_cv` / package API, or run `scripts/run_audit.py`.
+`Stress Level Classification.ipynb` — cleared outputs; uses `prepare_data` + package pipelines. Authority: `run_audit.py`. Optional XGBoost via `[benchmark]`.
 
-Clear stale outputs and run top-to-bottom in a fresh kernel after `pip install -e .`.
+```bash
+python -m jupyter nbconvert --to notebook --execute "Stress Level Classification.ipynb" --output /tmp/executed_stress_nb.ipynb
+```
 
-## Roadmap (not done here)
+## Roadmap (not done)
 
-- Sensitivity run including tail 21 rows; line-by-line source provenance.
-- Full experiment B nested search with shared outer folds.
-- Group-wise missingness, explanation stability, learning curves, external validation.
-
-## Reference materials used
-
-- `C:/Users/Boush/Downloads/audit_repro.py` — design reference (integrated into `src/stress_detection`).
-- `C:/Users/Boush/Downloads/new_README.md` — expected reporting template (numbers verified against local `results/audit_full/results.json` where CSV matches).
-
-No `AGENTS.md` existed upstream; see `AGENTS.md` in this repo for agent constraints.
+- Source-file lineage / label generation audit.
+- Full Experiment B nested search.
+- Clean-commit full audit regeneration into a new `results/` folder.
+- Explanation stability, learning curves, external validation.

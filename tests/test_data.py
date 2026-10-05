@@ -1,3 +1,5 @@
+"""Unit tests for data parsing and prepare_data."""
+
 from pathlib import Path
 
 import numpy as np
@@ -6,16 +8,17 @@ import pytest
 
 from stress_detection.data import (
     apply_label_driven_zero_map,
+    normalize_cell,
     parse_numeric_series,
     prepare_data,
     stress_label_exclusion_reason,
 )
+from stress_detection.hashes import normalize_newlines_to_lf, sha256_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
 CSV = ROOT / "StressLevelDataset_original.csv"
 
 
-@pytest.mark.skipif(not CSV.is_file(), reason="dataset missing")
 def test_curly_quote_parses_to_number():
     s = pd.Series(['"14"', "“16”", "0", " 3 "])
     out = parse_numeric_series(s)
@@ -23,6 +26,15 @@ def test_curly_quote_parses_to_number():
     assert out.iloc[1] == 16
     assert out.iloc[2] == 0
     assert out.iloc[3] == 3
+
+
+def test_normalize_cell_actions():
+    v, actions = normalize_cell("“16”")
+    assert v == "16"
+    assert "removed_outer_quotes" in actions
+    v2, actions2 = normalize_cell("Null")
+    assert v2 is None
+    assert "null_token_to_missing" in actions2
 
 
 def test_stress_label_rules():
@@ -38,6 +50,7 @@ def test_primary_row_count():
     assert len(prep.y) == 1098
     assert "stress_level" not in prep.feature_names
     assert prep.y.min() >= 0 and prep.y.max() <= 2
+    assert prep.csv_sha256_normalized_lf == "05145e0a27395e85f6ed062d6f89f99351bdd16f8fa7dc5e60243bd1083dab26"
 
 
 @pytest.mark.skipif(not CSV.is_file(), reason="dataset missing")
@@ -52,3 +65,11 @@ def test_label_zero_map_changes_zeros():
     Xm = apply_label_driven_zero_map(X, y)
     assert Xm.loc[0, "headache"] == 0
     assert Xm.loc[1, "sleep_quality"] == 4
+
+
+def test_lf_crlf_normalized_hash_equal():
+    lf = b"a,b\n1,2\n"
+    crlf = b"a,b\r\n1,2\r\n"
+    assert sha256_bytes(normalize_newlines_to_lf(lf)) == sha256_bytes(
+        normalize_newlines_to_lf(crlf)
+    )

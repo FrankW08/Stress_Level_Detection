@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -11,7 +9,10 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from stress_detection.hashes import sha256_file, sha256_file_normalized_lf
+
 AnalysisScope = Literal["primary", "sensitivity"]
+SensitivityPolicy = Literal["raw", "quarantine_out_of_range", "grouped_duplicates"]
 
 VALID_STRESS_LABELS = {0, 1, 2}
 
@@ -30,26 +31,30 @@ DEFAULT_FEATURE_MAX = 5.0
 NULL_TOKENS = frozenset({"", "null", "Null", "NULL", "nan", "NaN", "NA", "None"})
 
 
-def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def normalize_cell(value: object) -> str | None:
+def normalize_cell(value: object) -> tuple[str | None, list[str]]:
+    """Return (normalized string or None for missing, list of actions applied)."""
+    actions: list[str] = []
     if value is None or (isinstance(value, float) and np.isnan(value)):
-        return None
-    s = str(value).strip()
+        return None, ["already_missing"]
+    s = str(value)
+    stripped = s.strip()
+    if stripped != s:
+        actions.append("stripped_whitespace")
+    s = stripped
+    before = s
     s = s.strip('"').strip("'")
-    s = s.strip("\u201c\u201d")  # curly quotes
+    s = s.strip("\u201c\u201d")
+    if s != before:
+        actions.append("removed_outer_quotes")
     if s in NULL_TOKENS:
-        return None
-    return s
+        actions.append("null_token_to_missing")
+        return None, actions
+    return s, actions
 
 
 def parse_numeric_series(series: pd.Series) -> pd.Series:
-    """Parse string cells to float; invalid values become NaN (original string logged separately)."""
-    normalized = series.map(normalize_cell)
-    out = pd.to_numeric(normalized, errors="coerce")
-    return out
+    normalized = series.map(lambda v: normalize_cell(v)[0])
+    return pd.to_numeric(normalized, errors="coerce")
 
 
 def load_raw_csv(csv_path: Path) -> pd.DataFrame:
@@ -58,9 +63,7 @@ def load_raw_csv(csv_path: Path) -> pd.DataFrame:
 
 
 def parse_dataset(raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Return (parsed numeric frame with source_row_id, parse_issues table).
-    """
+    """Return (parsed numeric frame with source_row_id, parse_issues table)."""
     parsed = pd.DataFrame(
         {c: parse_numeric_series(raw[c]) for c in raw.columns},
         index=raw.index,
@@ -71,21 +74,87 @@ def parse_dataset(raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     for row_idx in raw.index:
         for col in raw.columns:
             orig = raw.at[row_idx, col]
-            norm = normalize_cell(orig)
-            if norm is None:
-                continue
-            try:
-                float(norm)
-            except ValueError:
+            norm, actions = normalize_cell(orig)
+            orig_s = (
+                ""
+                if orig is None or (isinstance(orig, float) and np.isnan(orig))
+                else str(orig)
+            )
+            if not actions and norm is not None:
+                try:
+                    float(norm)
+                    continue
+                except ValueError:
+                    pass
+
+            if "null_token_to_missing" in actions or (
+                norm is None and actions and actions != ["already_missing"]
+            ):
                 issues.append(
                     {
                         "source_row_id": int(row_idx),
                         "column": col,
-                        "original_value": str(orig),
-                        "reason": "non_numeric_after_normalization",
+                        "original_value": orig_s,
+                        "normalized_value": "",
+                        "action": ";".join(actions),
+                        "reason": "null_or_empty_to_missing",
                     }
                 )
+                continue
+
+            if "removed_outer_quotes" in actions or "stripped_whitespace" in actions:
+                try:
+                    if norm is not None:
+                        float(norm)
+                    issues.append(
+                        {
+                            "source_row_id": int(row_idx),
+                            "column": col,
+                            "original_value": orig_s,
+                            "normalized_value": "" if norm is None else norm,
+                            "action": ";".join(actions),
+                            "reason": "format_normalized",
+                        }
+                    )
+                except (ValueError, TypeError):
+                    issues.append(
+                        {
+                            "source_row_id": int(row_idx),
+                            "column": col,
+                            "original_value": orig_s,
+                            "normalized_value": "" if norm is None else norm,
+                            "action": ";".join(actions),
+                            "reason": "non_numeric_after_normalization",
+                        }
+                    )
+                continue
+
+            if norm is not None:
+                try:
+                    float(norm)
+                except ValueError:
+                    issues.append(
+                        {
+                            "source_row_id": int(row_idx),
+                            "column": col,
+                            "original_value": orig_s,
+                            "normalized_value": norm,
+                            "action": ";".join(actions) if actions else "none",
+                            "reason": "non_numeric_after_normalization",
+                        }
+                    )
     issues_df = pd.DataFrame(issues)
+    if issues_df.empty:
+        issues_df = pd.DataFrame(
+            columns=[
+                "source_row_id",
+                "column",
+                "original_value",
+                "normalized_value",
+                "action",
+                "reason",
+            ]
+        )
     return parsed, issues_df
 
 
@@ -105,6 +174,7 @@ def build_exclusions(
     scope: AnalysisScope,
     *,
     tail_quarantine_from: int = 1100,
+    quarantine_out_of_range: bool = False,
 ) -> pd.DataFrame:
     rows: list[dict] = []
     n = len(parsed)
@@ -125,11 +195,30 @@ def build_exclusions(
         reason = stress_label_exclusion_reason(parsed.at[i, "stress_level"])
         if reason:
             rows.append({"source_row_id": int(i), "reason": reason, "detail": ""})
-    # Deduplicate exclusion rows (same row, multiple reasons unlikely but keep first)
+
+    if quarantine_out_of_range:
+        feature_cols = [c for c in parsed.columns if c not in ("source_row_id", "stress_level")]
+        for i in label_rows:
+            if any(r["source_row_id"] == int(i) for r in rows):
+                continue
+            for c in feature_cols:
+                v = parsed.at[i, c]
+                if pd.isna(v):
+                    continue
+                prov = PROVISIONAL_MAX.get(c, DEFAULT_FEATURE_MAX)
+                if float(v) > prov:
+                    rows.append(
+                        {
+                            "source_row_id": int(i),
+                            "reason": "quarantine_out_of_range",
+                            "detail": f"{c}={v} > provisional_max={prov}",
+                        }
+                    )
+                    break
+
     if not rows:
         return pd.DataFrame(columns=["source_row_id", "reason", "detail"])
-    ex = pd.DataFrame(rows).drop_duplicates(subset=["source_row_id"], keep="first")
-    return ex
+    return pd.DataFrame(rows).drop_duplicates(subset=["source_row_id"], keep="first")
 
 
 def select_analysis_frame(
@@ -160,6 +249,36 @@ def field_checks(parsed: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def assign_duplicate_group_ids(X: pd.DataFrame) -> np.ndarray:
+    """Identical feature rows (including NaN pattern) share a duplicate_group_id."""
+    filled = X.astype("string").fillna("<NA>")
+    keys = filled.apply(lambda row: "|".join(row.tolist()), axis=1)
+    codes, _ = pd.factorize(keys, sort=True)
+    return codes.astype(int)
+
+
+def out_of_range_table(parsed: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    feature_cols = [c for c in parsed.columns if c not in ("source_row_id", "stress_level")]
+    for _, row in parsed.iterrows():
+        for c in feature_cols:
+            v = row[c]
+            if pd.isna(v):
+                continue
+            prov = PROVISIONAL_MAX.get(c, DEFAULT_FEATURE_MAX)
+            if float(v) > prov:
+                rows.append(
+                    {
+                        "source_row_id": int(row["source_row_id"]),
+                        "column": c,
+                        "value": float(v),
+                        "provisional_max": prov,
+                        "note": "provisional_bound_not_data_dictionary",
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
 @dataclass(frozen=True)
 class PreparedData:
     X: pd.DataFrame
@@ -169,8 +288,17 @@ class PreparedData:
     exclusions: pd.DataFrame
     parse_issues: pd.DataFrame
     field_checks: pd.DataFrame
-    csv_sha256: str
+    csv_sha256_raw: str
+    csv_sha256_normalized_lf: str
     scope: AnalysisScope
+    raw: pd.DataFrame
+    parsed: pd.DataFrame
+    duplicate_group_ids: np.ndarray
+    out_of_range: pd.DataFrame
+
+    @property
+    def csv_sha256(self) -> str:
+        return self.csv_sha256_raw
 
 
 def prepare_data(
@@ -178,20 +306,30 @@ def prepare_data(
     scope: AnalysisScope = "primary",
     *,
     tail_quarantine_from: int = 1100,
+    sensitivity_policy: SensitivityPolicy = "raw",
+    raw: pd.DataFrame | None = None,
+    parsed: pd.DataFrame | None = None,
+    parse_issues: pd.DataFrame | None = None,
 ) -> PreparedData:
     csv_path = Path(csv_path).resolve()
-    raw = load_raw_csv(csv_path)
-    parsed, parse_issues = parse_dataset(raw)
-    exclusions = build_exclusions(parsed, scope, tail_quarantine_from=tail_quarantine_from)
+    if raw is None:
+        raw = load_raw_csv(csv_path)
+    if parsed is None or parse_issues is None:
+        parsed, parse_issues = parse_dataset(raw)
+
+    quarantine_oor = scope == "sensitivity" and sensitivity_policy == "quarantine_out_of_range"
+    exclusions = build_exclusions(
+        parsed,
+        scope,
+        tail_quarantine_from=tail_quarantine_from,
+        quarantine_out_of_range=quarantine_oor,
+    )
     frame = select_analysis_frame(parsed, exclusions)
 
-    label_reasons = []
-    valid_mask = []
-    for _, row in frame.iterrows():
-        r = stress_label_exclusion_reason(row["stress_level"])
-        label_reasons.append(r)
-        valid_mask.append(r is None)
-    # Rows with bad labels should already be in exclusions; double-check:
+    valid_mask = [
+        stress_label_exclusion_reason(row["stress_level"]) is None
+        for _, row in frame.iterrows()
+    ]
     if not all(valid_mask):
         bad = frame.loc[[not m for m in valid_mask], "source_row_id"].tolist()
         raise ValueError(f"Unexpected illegal labels after exclusion: {bad}")
@@ -203,21 +341,28 @@ def prepare_data(
         X = X.drop(columns=["source_row_id"])
     else:
         ids = frame["source_row_id"].to_numpy()
+    X = X.reset_index(drop=True)
+    dup_ids = assign_duplicate_group_ids(X)
 
     return PreparedData(
-        X=X.reset_index(drop=True),
+        X=X,
         y=y,
         source_row_ids=ids.astype(int),
         feature_names=list(X.columns),
         exclusions=exclusions,
         parse_issues=parse_issues,
         field_checks=field_checks(parsed),
-        csv_sha256=sha256_file(csv_path),
+        csv_sha256_raw=sha256_file(csv_path),
+        csv_sha256_normalized_lf=sha256_file_normalized_lf(csv_path),
         scope=scope,
+        raw=raw,
+        parsed=parsed,
+        duplicate_group_ids=dup_ids,
+        out_of_range=out_of_range_table(parsed),
     )
 
 
-# Notebook / audit: intentional label-driven zero map (leakage demo only).
+# Audit-only: intentional label-driven zero map (never default training).
 LEAK_MAP: dict[str, list[int]] = {
     "headache": [0, 2, 4],
     "sleep_quality": [0, 3, 4],
@@ -240,6 +385,7 @@ LEAK_MAP: dict[str, list[int]] = {
 def apply_label_driven_zero_map(X: pd.DataFrame, labels: np.ndarray) -> pd.DataFrame:
     """Audit-only: replace zeros using stress labels (data leakage)."""
     Xm = X.copy()
+    labels = np.asarray(labels)
     for col, mapping in LEAK_MAP.items():
         if col not in Xm.columns:
             continue

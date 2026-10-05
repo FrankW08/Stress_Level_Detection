@@ -14,9 +14,9 @@ from sklearn.metrics import (
     f1_score,
     precision_recall_fscore_support,
 )
-from sklearn.model_selection import RepeatedStratifiedKFold
+from sklearn.model_selection import RepeatedStratifiedKFold, StratifiedGroupKFold
 
-from stress_detection.models import ModelFactory
+from stress_detection.models import ModelFactory, estimator_params
 
 
 @dataclass
@@ -27,13 +27,31 @@ class EvalConfig:
     scoring: str = "f1_macro"
 
 
-def outer_splits(n_samples: int, y: np.ndarray, cfg: EvalConfig) -> list[tuple[np.ndarray, np.ndarray]]:
+def outer_splits(
+    n_samples: int,
+    y: np.ndarray,
+    cfg: EvalConfig,
+    *,
+    groups: np.ndarray | None = None,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    X_dummy = np.zeros((n_samples, 1))
+    if groups is not None:
+        # Group-aware: StratifiedGroupKFold does not support n_repeats; emulate repeats
+        splits: list[tuple[np.ndarray, np.ndarray]] = []
+        for rep in range(cfg.n_repeats):
+            sgkf = StratifiedGroupKFold(
+                n_splits=cfg.n_splits,
+                shuffle=True,
+                random_state=cfg.seed + rep,
+            )
+            for tr, te in sgkf.split(X_dummy, y, groups):
+                splits.append((tr, te))
+        return splits
     rskf = RepeatedStratifiedKFold(
         n_splits=cfg.n_splits,
         n_repeats=cfg.n_repeats,
         random_state=cfg.seed,
     )
-    X_dummy = np.zeros((n_samples, 1))
     return list(rskf.split(X_dummy, y))
 
 
@@ -42,7 +60,7 @@ def per_class_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
     p, r, f1, sup = precision_recall_fscore_support(
         y_true, y_pred, labels=labels, zero_division=0
     )
-    out = {}
+    out: dict[str, Any] = {}
     for i, lab in enumerate(labels):
         out[str(lab)] = {
             "precision": float(p[i]),
@@ -56,12 +74,69 @@ def per_class_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
     cm = np.array(out["confusion_matrix"])
     denom = int((y_true == 0).sum() + (y_true == 2).sum())
     cross_02 = int(cm[0, 2] + cm[2, 0]) if cm.shape == (3, 3) else 0
-    out["cross_level_0_2_error_rate"] = {
+    out["cross_level_0_2"] = {
         "numerator": cross_02,
         "denominator": denom,
         "rate": float(cross_02 / denom) if denom else float("nan"),
     }
     return out
+
+
+def _fold_row_from_metrics(
+    rep: int,
+    fold: int,
+    name: str,
+    metrics: dict[str, Any],
+    selected_feature: str = "",
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "repeat": rep,
+        "fold": fold,
+        "model": name,
+        "macro_f1": metrics["macro_f1"],
+        "accuracy": metrics["accuracy"],
+        "selected_feature": selected_feature,
+        "cross_level_0_2_numerator": metrics["cross_level_0_2"]["numerator"],
+        "cross_level_0_2_denominator": metrics["cross_level_0_2"]["denominator"],
+        "cross_level_0_2_rate": metrics["cross_level_0_2"]["rate"],
+        "confusion_matrix": metrics["confusion_matrix"],
+    }
+    for lab in ("0", "1", "2"):
+        for k in ("precision", "recall", "f1", "support"):
+            row[f"class_{lab}_{k}"] = metrics[lab][k]
+    return row
+
+
+def summarize_fold_scores(fs: pd.DataFrame) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    metric_cols = [
+        "macro_f1",
+        "accuracy",
+        "cross_level_0_2_rate",
+        "class_0_precision",
+        "class_0_recall",
+        "class_0_f1",
+        "class_1_precision",
+        "class_1_recall",
+        "class_1_f1",
+        "class_2_precision",
+        "class_2_recall",
+        "class_2_f1",
+    ]
+    for name, g in fs.groupby("model"):
+        entry: dict[str, Any] = {}
+        for col in metric_cols:
+            if col not in g.columns:
+                continue
+            s = g[col].astype(float)
+            entry[f"{col}_mean"] = float(s.mean())
+            entry[f"{col}_std"] = float(s.std(ddof=1)) if len(s) > 1 else 0.0
+        # Aggregate confusion matrices across folds
+        cms = [np.array(m) for m in g["confusion_matrix"].tolist()]
+        entry["confusion_matrix_sum"] = np.sum(cms, axis=0).astype(int).tolist()
+        entry["confusion_matrix_per_fold"] = g["confusion_matrix"].tolist()
+        summary[name] = entry
+    return summary
 
 
 def run_audit_cv(
@@ -70,13 +145,16 @@ def run_audit_cv(
     source_row_ids: np.ndarray,
     models: dict[str, tuple[ModelFactory, list[str]]],
     cfg: EvalConfig,
+    *,
+    groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    outer = outer_splits(len(y), y, cfg)
+    outer = outer_splits(len(y), y, cfg, groups=groups)
     fold_rows: list[dict] = []
     inner_rows: list[dict] = []
     n_folds = len(outer)
     oof = {k: np.full((cfg.n_repeats, len(y)), -1, dtype=int) for k in models}
     fold_membership: list[dict] = []
+    model_params: dict[str, Any] = {}
 
     for f_idx, (tr, te) in enumerate(outer):
         rep, fold = divmod(f_idx, cfg.n_splits)
@@ -101,19 +179,21 @@ def run_audit_cv(
 
         for name, (factory, cols) in models.items():
             est = factory()
+            if name not in model_params:
+                model_params[name] = estimator_params(est)
             est.fit(X.iloc[tr][cols], y[tr])
             pred = est.predict(X.iloc[te][cols])
             oof[name][rep, te] = pred
             metrics = per_class_metrics(y[te], pred)
-            row = {
-                "repeat": rep,
-                "fold": fold,
-                "model": name,
-                "macro_f1": metrics["macro_f1"],
-                "accuracy": metrics["accuracy"],
-                "selected_feature": getattr(est, "feature_", ""),
-            }
-            fold_rows.append(row)
+            fold_rows.append(
+                _fold_row_from_metrics(
+                    rep,
+                    fold,
+                    name,
+                    metrics,
+                    selected_feature=getattr(est, "feature_", ""),
+                )
+            )
             if name == "nested_single" and hasattr(est, "candidates_"):
                 for feat, score in est.candidates_.items():
                     inner_rows.append(
@@ -126,21 +206,16 @@ def run_audit_cv(
                     )
 
     fs = pd.DataFrame(fold_rows)
-    summary = {}
-    for name, g in fs.groupby("model"):
-        summary[name] = {
-            "macro_f1_mean": float(g["macro_f1"].mean()),
-            "macro_f1_std": float(g["macro_f1"].std(ddof=1)),
-            "accuracy_mean": float(g["accuracy"].mean()),
-            "accuracy_std": float(g["accuracy"].std(ddof=1)),
-        }
+    # Drop nested list column from CSV-friendly copy later; keep in memory
     return {
         "fold_scores": fs,
         "inner_candidates": pd.DataFrame(inner_rows),
         "folds": pd.DataFrame(fold_membership),
         "oof": oof,
-        "summary": summary,
+        "summary": summarize_fold_scores(fs),
         "n_outer_folds": n_folds,
+        "outer": outer,
+        "model_params": model_params,
     }
 
 
@@ -151,7 +226,7 @@ def paired_comparison(
     outer: list[tuple[np.ndarray, np.ndarray]],
     *,
     direction: str = "a_minus_b",
-) -> dict[str, float]:
+) -> dict[str, Any]:
     """Nadeau–Bengio style corrected SE; approximate interval (df = n_folds - 1)."""
     a = fold_scores.loc[fold_scores.model == model_a, "macro_f1"].to_numpy()
     b = fold_scores.loc[fold_scores.model == model_b, "macro_f1"].to_numpy()
@@ -173,4 +248,15 @@ def paired_comparison(
         "t_crit": t_crit,
         "approx_ci95": [float(d.mean() - t_crit * se), float(d.mean() + t_crit * se)],
         "share_of_folds_a_higher_descriptive": float((d > 0).mean()),
+    }
+
+
+def metrics_from_oof(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> dict[str, float]:
+    """Recompute accuracy / macro-F1 from a single OOF vector."""
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro")),
     }

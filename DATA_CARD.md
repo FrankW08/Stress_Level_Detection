@@ -19,7 +19,14 @@
 | Scope | Rule |
 |--------|------|
 | **primary** | Rows `source_row_id` 0–1099, minus label exclusions. Tail rows ≥1100 quarantined by **audit convention** (not proof of forgery). |
-| **sensitivity** | All rows with valid labels; same feature schema checks. |
+| **sensitivity** | All rows with valid labels; policies: `raw` (describe/mark; refuse CV if identical-feature duplicates cross folds), `quarantine_out_of_range` (exclude provisional-bound exceedances), `grouped_duplicates` (StratifiedGroupKFold on `duplicate_group_id`). |
+
+Provisional max bounds in code are **not** a confirmed data dictionary.
+
+## Hashes
+
+Audits record raw CSV SHA-256 and LF-normalized SHA-256 (see README line-ending note).
+
 
 ## Feature schema (provisional — verify against source)
 
