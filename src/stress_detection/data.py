@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from stress_detection.hashes import sha256_file, sha256_file_normalized_lf
+from stress_detection.schema import FieldRule, PROVISIONAL_SCHEMA, rule_for
 
 AnalysisScope = Literal["primary", "sensitivity"]
 SensitivityPolicy = Literal["raw", "quarantine_out_of_range", "grouped_duplicates"]
@@ -230,12 +231,116 @@ def select_analysis_frame(
     return keep.reset_index(drop=True)
 
 
+def _is_missing(value: object) -> bool:
+    return value is None or (isinstance(value, float) and np.isnan(value)) or pd.isna(value)
+
+
+def _is_non_finite(value: object) -> bool:
+    if _is_missing(value):
+        return False
+    try:
+        fv = float(value)
+    except (TypeError, ValueError):
+        return False
+    return not np.isfinite(fv)
+
+
+def classify_cell_violations(column: str, value: object, rule: FieldRule | None) -> list[str]:
+    """Return zero or more violation codes. Missing is not a domain violation."""
+    if _is_missing(value):
+        return []
+    if _is_non_finite(value):
+        return ["non_finite"]
+    if rule is None:
+        return []
+    fv = float(value)
+    codes: list[str] = []
+    if rule.lower_bound is not None and fv < rule.lower_bound:
+        codes.append("below_min")
+    if rule.upper_bound is not None and fv > rule.upper_bound:
+        codes.append("above_max")
+    if rule.integer_required and not float(fv).is_integer():
+        codes.append("non_integer")
+    if rule.allowed_values is not None and fv not in rule.allowed_values:
+        codes.append("invalid_category")
+    return codes
+
+
+def domain_violations_table(parsed: pd.DataFrame) -> pd.DataFrame:
+    """Cell-level provisional-schema violations (reporting only)."""
+    rows: list[dict] = []
+    columns = [c for c in parsed.columns if c != "source_row_id"]
+    for _, row in parsed.iterrows():
+        for c in columns:
+            rule = rule_for(c)
+            v = row[c]
+            if _is_missing(v):
+                continue
+            for code in classify_cell_violations(c, v, rule):
+                rows.append(
+                    {
+                        "source_row_id": int(row["source_row_id"]),
+                        "column": c,
+                        "parsed_value": float(v) if not _is_non_finite(v) else str(v),
+                        "violation": code,
+                        "lower_bound": None if rule is None else rule.lower_bound,
+                        "upper_bound": None if rule is None else rule.upper_bound,
+                        "integer_required": None if rule is None else rule.integer_required,
+                        "allowed_values": (
+                            None
+                            if rule is None or rule.allowed_values is None
+                            else ",".join(str(int(x) if float(x).is_integer() else x) for x in sorted(rule.allowed_values))
+                        ),
+                        "rule_source": None if rule is None else rule.source,
+                        "rule_status": None if rule is None else rule.status,
+                    }
+                )
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "source_row_id",
+                "column",
+                "parsed_value",
+                "violation",
+                "lower_bound",
+                "upper_bound",
+                "integer_required",
+                "allowed_values",
+                "rule_source",
+                "rule_status",
+            ]
+        )
+    return pd.DataFrame(rows)
+
+
+def domain_violation_counts(violations: pd.DataFrame, parsed: pd.DataFrame) -> dict[str, int]:
+    if violations.empty:
+        n_missing_cells = int(parsed.drop(columns=["source_row_id"], errors="ignore").isna().sum().sum())
+        return {
+            "n_violation_records": 0,
+            "n_cells_with_any_violation": 0,
+            "n_rows_with_any_violation": 0,
+            "n_missing_cells": n_missing_cells,
+        }
+    cells = violations[["source_row_id", "column"]].drop_duplicates()
+    n_missing_cells = int(parsed.drop(columns=["source_row_id"], errors="ignore").isna().sum().sum())
+    return {
+        "n_violation_records": int(len(violations)),
+        "n_cells_with_any_violation": int(len(cells)),
+        "n_rows_with_any_violation": int(cells["source_row_id"].nunique()),
+        "n_missing_cells": n_missing_cells,
+    }
+
+
 def field_checks(parsed: pd.DataFrame) -> pd.DataFrame:
-    feature_cols = [c for c in parsed.columns if c not in ("source_row_id", "stress_level")]
+    feature_cols = [c for c in parsed.columns if c not in ("source_row_id",)]
+    violations = domain_violations_table(parsed)
     records = []
     for c in feature_cols:
         s = parsed[c]
+        rule = rule_for(c)
         prov = PROVISIONAL_MAX.get(c, DEFAULT_FEATURE_MAX)
+        gv = violations[violations["column"] == c] if not violations.empty else violations
         records.append(
             {
                 "field": c,
@@ -244,6 +349,13 @@ def field_checks(parsed: pd.DataFrame) -> pd.DataFrame:
                 "n_missing": int(s.isna().sum()),
                 "provisional_max": prov,
                 "n_above_provisional_max": int((s > prov).sum(skipna=True)),
+                "n_below_min": int((gv["violation"] == "below_min").sum()) if len(gv) else 0,
+                "n_above_max": int((gv["violation"] == "above_max").sum()) if len(gv) else 0,
+                "n_non_integer": int((gv["violation"] == "non_integer").sum()) if len(gv) else 0,
+                "n_invalid_category": int((gv["violation"] == "invalid_category").sum()) if len(gv) else 0,
+                "n_non_finite": int((gv["violation"] == "non_finite").sum()) if len(gv) else 0,
+                "rule_status": None if rule is None else rule.status,
+                "rule_source": None if rule is None else rule.source,
             }
         )
     return pd.DataFrame(records)
@@ -255,6 +367,103 @@ def assign_duplicate_group_ids(X: pd.DataFrame) -> np.ndarray:
     keys = filled.apply(lambda row: "|".join(row.tolist()), axis=1)
     codes, _ = pd.factorize(keys, sort=True)
     return codes.astype(int)
+
+
+def feature_columns(parsed: pd.DataFrame) -> list[str]:
+    return [c for c in parsed.columns if c not in ("source_row_id", "stress_level")]
+
+
+def feature_values_differ(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Element-wise difference; matching NaN patterns count as equal."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    both_missing = np.isnan(a) & np.isnan(b)
+    return ~both_missing & (a != b)
+
+
+def assert_finite_or_nan(X: pd.DataFrame) -> None:
+    """sklearn can impute NaN but not inf / other non-finite values."""
+    arr = X.to_numpy(dtype=float)
+    bad = ~np.isfinite(arr) & ~np.isnan(arr)
+    if bad.any():
+        rows, cols = np.where(bad)
+        colname = X.columns[int(cols[0])]
+        rid = rows[0]
+        raise ValueError(
+            f"non-finite value in feature {colname!r} at included-row index {int(rid)} "
+            f"(value={arr[rid, cols[0]]!r}); refusing to silently replace it"
+        )
+
+
+def label_conflict_table(parsed: pd.DataFrame) -> pd.DataFrame:
+    """Rows that share a feature group with more than one distinct valid label.
+
+    Uses the same feature-group definition as ``assign_duplicate_group_ids``.
+    Missing or illegal labels are not counted as a valid class; every member of
+    a conflicting group is reported (including rows with missing/illegal labels).
+    This is an audit table, not a confirmed mislabel list.
+    """
+    cols = feature_columns(parsed)
+    gids = assign_duplicate_group_ids(parsed[cols])
+    rows: list[dict] = []
+    for gid in np.unique(gids):
+        members = parsed.loc[gids == gid]
+        valid: list[int] = []
+        n_invalid = 0
+        for v in members["stress_level"]:
+            if stress_label_exclusion_reason(v if not pd.isna(v) else None) is None:
+                valid.append(int(v))
+            else:
+                n_invalid += 1
+        distinct = sorted(set(valid))
+        if len(distinct) <= 1:
+            continue
+        counts = {str(k): valid.count(k) for k in distinct}
+        count_text = ",".join(f"{k}:{counts[str(k)]}" for k in distinct)
+        for _, rec in members.iterrows():
+            raw_label = rec["stress_level"]
+            rows.append(
+                {
+                    "conflict_group_id": int(gid),
+                    "source_row_id": int(rec["source_row_id"]),
+                    "stress_level": (None if pd.isna(raw_label) else float(raw_label)),
+                    "group_size": int(len(members)),
+                    "n_distinct_valid_labels": int(len(distinct)),
+                    "valid_label_counts": count_text,
+                    "n_invalid_or_missing_labels": int(n_invalid),
+                }
+            )
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "conflict_group_id",
+                "source_row_id",
+                "stress_level",
+                "group_size",
+                "n_distinct_valid_labels",
+                "valid_label_counts",
+                "n_invalid_or_missing_labels",
+            ]
+        )
+    return pd.DataFrame(rows)
+
+
+def invalid_or_missing_label_table(parsed: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict] = []
+    for _, rec in parsed.iterrows():
+        v = rec["stress_level"]
+        reason = stress_label_exclusion_reason(None if pd.isna(v) else v)
+        if reason:
+            rows.append(
+                {
+                    "source_row_id": int(rec["source_row_id"]),
+                    "stress_level": None if pd.isna(v) else float(v),
+                    "reason": reason,
+                }
+            )
+    if not rows:
+        return pd.DataFrame(columns=["source_row_id", "stress_level", "reason"])
+    return pd.DataFrame(rows)
 
 
 def out_of_range_table(parsed: pd.DataFrame) -> pd.DataFrame:
@@ -295,6 +504,8 @@ class PreparedData:
     parsed: pd.DataFrame
     duplicate_group_ids: np.ndarray
     out_of_range: pd.DataFrame
+    domain_violations: pd.DataFrame
+    domain_violation_summary: dict
 
     @property
     def csv_sha256(self) -> str:
@@ -343,6 +554,8 @@ def prepare_data(
         ids = frame["source_row_id"].to_numpy()
     X = X.reset_index(drop=True)
     dup_ids = assign_duplicate_group_ids(X)
+    violations = domain_violations_table(parsed)
+    assert_finite_or_nan(X)
 
     return PreparedData(
         X=X,
@@ -359,6 +572,8 @@ def prepare_data(
         parsed=parsed,
         duplicate_group_ids=dup_ids,
         out_of_range=out_of_range_table(parsed),
+        domain_violations=violations,
+        domain_violation_summary=domain_violation_counts(violations, parsed),
     )
 
 

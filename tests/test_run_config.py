@@ -17,7 +17,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from stress_detection.audit import PERSISTENT_ERROR_THRESHOLD  # noqa: E402
 from stress_detection.run_config import (  # noqa: E402
     ConfigError,
+    load_yaml_config,
     resolve_eval_settings,
+    resolve_run_settings,
     validate_file_config,
 )
 
@@ -67,9 +69,7 @@ def test_cli_overrides_config_and_smoke(smoke):
 
 
 def test_primary_config_file_is_valid():
-    from run_audit import _load_yaml_config
-
-    cfg = _load_yaml_config(ROOT / "configs" / "audit_primary.yaml")
+    cfg = load_yaml_config(ROOT / "configs" / "audit_primary.yaml")
     assert _validate(cfg) == {"n_splits": 5, "n_repeats": 10, "seed": 0}
 
 
@@ -86,6 +86,18 @@ def test_primary_config_file_is_valid():
         ({"eval": [5, 10]}, "must be a mapping"),
         ({"seed": 0, "eval": {"seed": 1}}, "disagree"),
         ({"persistent_error_threshold": 0.9}, "not configurable"),
+        ({"scope": "primry"}, "scope must be one of"),
+        ({"scope": "Primary"}, "scope must be one of"),
+        ({"sensitivity_policy": "groupped_duplicates"}, "sensitivity_policy must be one of"),
+        ({"seed": 1.9}, "seed must be an integer"),
+        ({"seed": True}, "seed must be an integer"),
+        ({"seed": "0"}, "seed must be an integer"),
+        ({"n_perm": -1}, "n_perm must be >= 1"),
+        ({"n_perm": 0}, "n_perm must be >= 1"),
+        ({"n_perm": 1.5}, "n_perm must be an integer"),
+        ({"smoke": 1}, "smoke must be a bool"),
+        ({"tail_quarantine_from": 0}, "tail_quarantine_from must be >= 1"),
+        ({"near_dup_row_limit": -3}, "near_dup_row_limit must be >= 1"),
     ],
 )
 def test_invalid_config_rejected(cfg, match):
@@ -170,7 +182,12 @@ def test_cli_smoke_with_config_uses_smoke_defaults_and_records_why(tmp_path):
     _assert_effective_cv(out, res, n_splits=3, n_repeats=1)
     resolution = res["config"]["settings_resolution"]
     assert resolution["eval_sources"] == {"n_splits": "smoke_default", "n_repeats": "smoke_default"}
-    assert len(resolution["eval_notes"]) == 2
+    notes = resolution["eval_notes"]
+    assert sum("eval.n_splits" in n for n in notes) == 1
+    assert sum("eval.n_repeats" in n for n in notes) == 1
+    assert any("n_perm requested=100" in n for n in notes)
+    assert res["config"]["n_perm"] == 5
+    assert res["config"]["n_perm_requested"] == 100
 
 
 @pytest.mark.skipif(not CSV.is_file(), reason="dataset missing")
@@ -189,3 +206,82 @@ def test_cli_flags_override_smoke_and_config(tmp_path):
     )
     _assert_effective_cv(out, res, n_splits=2, n_repeats=2)
     assert res["config"]["settings_resolution"]["eval_sources"] == {"n_splits": "cli", "n_repeats": "cli"}
+
+
+def test_yaml_non_mapping_root_rejected(tmp_path):
+    for body in ("[]\n", "false\n", "null\n"):
+        p = _write_config(tmp_path / "bad.yaml", body)
+        with pytest.raises(ConfigError, match="mapping|empty"):
+            load_yaml_config(p)
+
+
+def test_yaml_empty_file_rejected(tmp_path):
+    p = _write_config(tmp_path / "empty.yaml", "")
+    with pytest.raises(ConfigError, match="empty"):
+        load_yaml_config(p)
+
+
+def test_resolve_records_smoke_n_perm_override():
+    s = resolve_run_settings(
+        file_cfg={"n_perm": 100, "smoke": True},
+        persistent_error_threshold=PERSISTENT_ERROR_THRESHOLD,
+    )
+    assert s.n_perm == 5
+    assert s.n_perm_requested == 100
+    assert s.sources["n_perm"] == "smoke_default"
+    assert any("n_perm requested=100" in n for n in s.notes)
+
+
+def test_resolve_cli_n_perm_beats_smoke():
+    s = resolve_run_settings(
+        file_cfg={"n_perm": 100, "smoke": True},
+        persistent_error_threshold=PERSISTENT_ERROR_THRESHOLD,
+        cli_n_perm=2,
+        cli_smoke=True,
+    )
+    assert s.n_perm == 2
+    assert s.sources["n_perm"] == "cli"
+
+
+@pytest.mark.parametrize(
+    "body, match",
+    [
+        ("scope: primry\n", "scope must be one of"),
+        ("seed: 1.9\n", "seed must be an integer"),
+        ("seed: true\n", "seed must be an integer"),
+        ("n_perm: -1\n", "n_perm must be >= 1"),
+    ],
+)
+def test_cli_yaml_illegal_values_do_not_create_output(tmp_path, body, match):
+    cfg = _write_config(tmp_path / "bad.yaml", body)
+    out = tmp_path / "never"
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(CSV), str(out), "--config", str(cfg)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    assert match in proc.stderr
+    assert not out.exists()
+
+
+def test_api_scope_typo_rejected(tmp_path):
+    from stress_detection.audit import run_full_audit
+
+    out = tmp_path / "typo"
+    with pytest.raises(ConfigError, match="scope must be one of"):
+        run_full_audit(CSV, out, scope="primry", smoke=True, seed=0, project_root=ROOT)
+    assert not out.exists()
+
+
+def test_cli_missing_out_dir_errors(tmp_path):
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--smoke"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    assert "out_dir" in proc.stderr
+    assert not (tmp_path / "results").exists()

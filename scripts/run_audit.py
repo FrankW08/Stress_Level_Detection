@@ -14,62 +14,23 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from stress_detection.audit import PERSISTENT_ERROR_THRESHOLD, run_full_audit  # noqa: E402
 from stress_detection.hashes import sha256_file_normalized_lf  # noqa: E402
+from stress_detection.io_guard import OutputDirError  # noqa: E402
 from stress_detection.run_config import (  # noqa: E402
     ConfigError,
-    resolve_eval_settings,
-    validate_file_config,
+    load_yaml_config,
+    resolve_run_settings,
 )
 
 
-def _load_yaml_config(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    try:
-        import yaml  # type: ignore
-
-        data = yaml.safe_load(text) or {}
-        if not isinstance(data, dict):
-            raise ValueError("config root must be a mapping")
-        return data
-    except ImportError:
-        # Minimal YAML subset: key: value lines and one-level nested maps
-        cfg: dict[str, Any] = {}
-        current: dict[str, Any] | None = None
-        current_key: str | None = None
-        for line in text.splitlines():
-            if not line.strip() or line.strip().startswith("#"):
-                continue
-            if line.startswith("  ") and current is not None and current_key:
-                k, _, v = line.strip().partition(":")
-                current[k.strip()] = _parse_scalar(v.strip())
-            elif ":" in line and not line.startswith(" "):
-                k, _, v = line.partition(":")
-                k = k.strip()
-                v = v.strip()
-                if v == "":
-                    current = {}
-                    current_key = k
-                    cfg[k] = current
-                else:
-                    current = None
-                    current_key = None
-                    cfg[k] = _parse_scalar(v)
-        return cfg
-
-
-def _parse_scalar(v: str) -> Any:
-    if v.lower() in ("true", "false"):
-        return v.lower() == "true"
-    try:
-        return int(v)
-    except ValueError:
-        try:
-            return float(v)
-        except ValueError:
-            return v.strip('"').strip("'")
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Stress level detection audit (experiment A)")
+    parser = argparse.ArgumentParser(
+        description="Stress level detection audit (experiment A)",
+        epilog=(
+            "The output directory is required and must be new or empty. "
+            "Example: python scripts/run_audit.py StressLevelDataset_original.csv "
+            "results/audit_new --config configs/audit_primary.yaml"
+        ),
+    )
     parser.add_argument(
         "csv",
         type=Path,
@@ -80,17 +41,18 @@ def main() -> int:
     parser.add_argument(
         "out_dir",
         type=Path,
-        nargs="?",
-        default=ROOT / "results" / "audit_full",
-        help="Output directory (created if missing; used exactly as specified)",
+        help=(
+            "Output directory (required). Must not already contain files. "
+            "Example: results/audit_new"
+        ),
     )
     parser.add_argument(
         "--config",
         type=Path,
         default=None,
-        help="Optional YAML config (CLI flags override config values)",
+        help="Optional YAML config (CLI flags override config values except as documented for smoke)",
     )
-    parser.add_argument("--n-perm", type=int, default=None, help="Permutation count")
+    parser.add_argument("--n-perm", type=int, default=None, help="Permutation count (>=1)")
     parser.add_argument(
         "--scope",
         choices=("primary", "sensitivity"),
@@ -101,7 +63,7 @@ def main() -> int:
         "--smoke",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Fast smoke run (3x1 CV unless --n-splits/--n-repeats given, 5 perms)",
+        help="Fast smoke run (3x1 CV and 5 perms unless --n-splits/--n-repeats/--n-perm given)",
     )
     parser.add_argument(
         "--n-splits",
@@ -132,79 +94,54 @@ def main() -> int:
 
     file_cfg: dict[str, Any] = {}
     config_info: dict[str, Any] = {"path": None, "sha256_normalized_lf": None}
-    if args.config is not None:
-        config_path = args.config.resolve()
-        file_cfg = _load_yaml_config(config_path)
-        config_info = {
-            "path": args.config.as_posix(),
-            "sha256_normalized_lf": sha256_file_normalized_lf(config_path),
-        }
-
     try:
-        eval_cfg = validate_file_config(
-            file_cfg, persistent_error_threshold=PERSISTENT_ERROR_THRESHOLD
-        )
-    except ConfigError as exc:
-        parser.error(f"invalid config: {exc}")
-
-    def pick(cli_val: Any, *keys: str, default: Any) -> Any:
-        if cli_val is not None:
-            return cli_val
-        for k in keys:
-            if k in file_cfg:
-                return file_cfg[k]
-            if k in eval_cfg:
-                return eval_cfg[k]
-        return default
-
-    scope = pick(args.scope, "scope", default="primary")
-    smoke = pick(args.smoke, "smoke", default=False)
-    seed = int(pick(args.seed, "seed", default=0))
-    n_perm = int(pick(args.n_perm, "n_perm", default=100))
-    sensitivity_policy = pick(
-        args.sensitivity_policy, "sensitivity_policy", default="raw"
-    )
-    near_dup = int(
-        pick(args.near_dup_row_limit, "near_dup_row_limit", "tail_quarantine_from", default=1100)
-    )
-    tail_q = int(file_cfg.get("tail_quarantine_from", 1100))
-
-    if not isinstance(smoke, bool):
-        parser.error(f"invalid config: smoke must be true/false, got {smoke!r}")
-    try:
-        eval_settings = resolve_eval_settings(
-            smoke=smoke,
+        if args.config is not None:
+            config_path = args.config.resolve()
+            file_cfg = load_yaml_config(config_path)
+            config_info = {
+                "path": args.config.as_posix(),
+                "sha256_normalized_lf": sha256_file_normalized_lf(config_path),
+            }
+        settings = resolve_run_settings(
+            file_cfg=file_cfg,
+            persistent_error_threshold=PERSISTENT_ERROR_THRESHOLD,
+            cli_scope=args.scope,
+            cli_sensitivity_policy=args.sensitivity_policy,
+            cli_smoke=args.smoke,
+            cli_seed=args.seed,
+            cli_n_perm=args.n_perm,
             cli_n_splits=args.n_splits,
             cli_n_repeats=args.n_repeats,
-            file_eval=eval_cfg,
+            cli_near_dup_row_limit=args.near_dup_row_limit,
         )
     except ConfigError as exc:
         parser.error(str(exc))
-    for note in eval_settings["notes"]:
+
+    for note in settings.notes:
         print(f"note: {note}", file=sys.stderr)
 
     csv_path = args.csv.resolve()
-    out_dir = args.out_dir.resolve()  # exact path; no automatic _smoke suffix
+    out_dir = args.out_dir.resolve()
 
-    results = run_full_audit(
-        csv_path,
-        out_dir,
-        scope=scope,
-        n_perm=n_perm,
-        smoke=smoke,
-        seed=seed,
-        project_root=ROOT,
-        tail_quarantine_from=tail_q,
-        near_dup_row_limit=near_dup,
-        sensitivity_policy=sensitivity_policy,
-        n_splits=eval_settings["n_splits"],
-        n_repeats=eval_settings["n_repeats"],
-        settings_resolution={
-            "config_file": config_info,
-            "eval_sources": eval_settings["sources"],
-            "eval_notes": eval_settings["notes"],
-        },
-    )
+    try:
+        results = run_full_audit(
+            csv_path,
+            out_dir,
+            settings=settings,
+            project_root=ROOT,
+            settings_resolution={
+                "config_file": config_info,
+                "eval_sources": {
+                    "n_splits": settings.sources["n_splits"],
+                    "n_repeats": settings.sources["n_repeats"],
+                },
+                "eval_notes": settings.notes,
+                "sources": settings.sources,
+            },
+        )
+    except (ConfigError, OutputDirError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     keys = ("run_mode", "config", "models", "paired", "permutation", "sensitivity")
     print(json.dumps({k: results[k] for k in keys if k in results}, indent=2))
     return 0

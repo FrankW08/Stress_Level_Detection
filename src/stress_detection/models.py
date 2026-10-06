@@ -11,7 +11,7 @@ from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold, cross_val_score
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
@@ -86,6 +86,57 @@ def tie_break_feature(scores: dict[str, float]) -> str:
     return candidates[0]
 
 
+def grouped_inner_splits(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    groups: np.ndarray,
+    *,
+    n_splits: int,
+    random_state: int,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """StratifiedGroupKFold splits with an explicit train/valid group-disjoint check.
+
+    Refuses to fall back to ungrouped StratifiedKFold.
+    """
+    n_groups = int(len(np.unique(groups)))
+    if n_splits > n_groups:
+        raise ValueError(
+            f"inner_splits={n_splits} exceeds n_groups={n_groups} in the outer training "
+            "fold; refusing to fall back to ungrouped StratifiedKFold"
+        )
+    class_counts = np.bincount(np.asarray(y, dtype=int))
+    class_counts = class_counts[class_counts > 0]
+    if len(class_counts) < 2:
+        raise ValueError(
+            f"inner_splits={n_splits} not feasible: outer training fold has "
+            f"{len(class_counts)} class(es); refusing to fall back to ungrouped CV"
+        )
+    if n_splits > int(class_counts.min()):
+        raise ValueError(
+            f"inner_splits={n_splits} exceeds smallest class count "
+            f"({int(class_counts.min())}) in the outer training fold; "
+            "refusing to fall back to ungrouped StratifiedKFold"
+        )
+    try:
+        sgkf = StratifiedGroupKFold(
+            n_splits=n_splits, shuffle=True, random_state=random_state
+        )
+        splits = list(sgkf.split(X, y, groups))
+    except ValueError as exc:
+        raise ValueError(
+            f"inner_splits={n_splits} is not feasible for grouped inner CV "
+            f"(n_groups={n_groups}): {exc}. Refusing to fall back to ungrouped StratifiedKFold"
+        ) from exc
+    for fold_i, (tr, te) in enumerate(splits):
+        overlap = set(groups[tr]) & set(groups[te])
+        if overlap:
+            raise ValueError(
+                f"inner fold {fold_i}: train/valid groups overlap ({sorted(overlap)[:8]}); "
+                "refusing to continue"
+            )
+    return splits
+
+
 class NestedBestSingleFeature(BaseEstimator, ClassifierMixin):
     """Inner 3-fold CV on training fold only; depth-3 tree on one feature."""
 
@@ -93,18 +144,32 @@ class NestedBestSingleFeature(BaseEstimator, ClassifierMixin):
         self.random_state = random_state
         self.inner_splits = inner_splits
 
-    def fit(self, X: pd.DataFrame, y: np.ndarray):
+    def fit(self, X: pd.DataFrame, y: np.ndarray, groups: np.ndarray | None = None):
         X = pd.DataFrame(X)
-        inner = StratifiedKFold(
-            n_splits=self.inner_splits, shuffle=True, random_state=self.random_state
-        )
+        y = np.asarray(y)
+        if groups is None:
+            inner = StratifiedKFold(
+                n_splits=self.inner_splits, shuffle=True, random_state=self.random_state
+            )
+            cv_splits = list(inner.split(X, y))
+        else:
+            groups = np.asarray(groups)
+            if len(groups) != len(X):
+                raise ValueError(
+                    f"groups length {len(groups)} != n_samples {len(X)} for nested inner CV"
+                )
+            cv_splits = grouped_inner_splits(
+                X, y, groups, n_splits=self.inner_splits, random_state=self.random_state
+            )
+        self.inner_splits_used_ = cv_splits
+        self.used_groups_ = groups is not None
         self.candidates_: dict[str, float] = {}
         for col in X.columns:
             scores = cross_val_score(
                 tree_depth3_pipeline(random_state=self.random_state),
                 X[[col]],
                 y,
-                cv=inner,
+                cv=cv_splits,
                 scoring="f1_macro",
             )
             self.candidates_[col] = float(scores.mean())

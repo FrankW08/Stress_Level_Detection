@@ -4,9 +4,15 @@ Multiclass classification of student **stress_level** (0 / 1 / 2) from questionn
 
 ## Research boundary
 
-- **Primary question:** How well do standard models predict `stress_level` under nested preprocessing and fixed audit protocols?
-- **Not claimed:** causal effects, synthetic-data status, theoretical performance ceiling, or external validity.
+Current results support **prediction of the `stress_level` column that is already in this CSV**, plus a **leakage audit of the training code**. They do not establish how those labels were generated, who the respondents were, or whether the same scores would hold on new data.
+
+- **Not claimed:** causal effects, clinical validity, synthetic-data status, a theoretical performance ceiling, or external generalization.
+- Removing label-driven zero imputation from the default path removes that **code-level** leak. It does **not** prove that `stress_level` is independent of the input fields (the label could still have been derived from them).
+- Rows 0–1099 are an **audit convention** for the primary scope, not a confirmed target population.
+- `grouped_duplicates` groups **identical feature vectors**, not known subjects.
+- Conflict groups, domain-rule violations and persistent-error flags are audit findings, **not** confirmed mislabels.
 - **Invalid historical scores:** Old Notebook SVM figures near **94%** used **label-driven zero imputation** and other leakage; old LR figures near **88%** are **not** verified benchmarks.
+- Experiment B (nested hyperparameter search) is still a stub. There is no external validation set. See `RESEARCH_TODO.md`.
 
 ## Data and line endings
 
@@ -47,8 +53,10 @@ Fixed-parameter models, shared **RepeatedStratifiedKFold** (default 5×10, `--se
 
 All commands below are run from the repository root with the project environment active (or prefixed with `uv run`).
 
+The output directory is **required** and must be new or empty. The program refuses a non-empty directory (including `results/audit_full`) before writing anything. There is no `--overwrite`. A failed run may leave `run_status.json` as `in_progress` plus partial CSVs; that is not a completed audit — rerun into a new directory. `results.json` is written only at the end.
+
 ```bash
-# Smoke — output directory is used exactly as given
+# Smoke — choose a new empty directory; do not omit the output path
 python scripts/run_audit.py StressLevelDataset_original.csv /tmp/audit_smoke --smoke --config configs/audit_primary.yaml
 
 # Seed check
@@ -60,7 +68,7 @@ python scripts/run_audit.py StressLevelDataset_original.csv /tmp/audit_sens --sm
 
 ### Formal full run (clean working tree only)
 
-The audit runs only if git succeeds, `git status --porcelain` prints nothing (no modified, staged or untracked files), and the output directory does not exist yet. Each run writes to a new directory; `results/audit_full` is never overwritten.
+The audit runs only if git succeeds, `git status --porcelain` prints nothing (no modified, staged or untracked files), and the output directory does not exist yet. The program itself also refuses a non-empty output directory. Each run writes to a new directory; `results/audit_full` and `results/audit_full_d12aa67_clean` are never overwritten.
 
 PowerShell:
 
@@ -97,18 +105,24 @@ Afterwards `results.json["git"]` should show `"dirty": false` and `"git_state_ca
 
 ### Settings precedence
 
-For outer CV `n_splits` / `n_repeats`:
+For `n_splits` / `n_repeats` / `n_perm`:
 
-1. `--n-splits` / `--n-repeats` on the command line (applies in any mode);
-2. `--smoke` (or `smoke: true` in the config): 3 splits × 1 repeat; config `eval.*` values are not applied, and a note is printed and recorded;
-3. config `eval.n_splits` / `eval.n_repeats`;
-4. defaults: 5 splits × 10 repeats.
+1. `--n-splits` / `--n-repeats` / `--n-perm` on the command line (applies in any mode);
+2. smoke defaults: 3 splits × 1 repeat and **5** permutations; YAML values are not applied, and the requested vs effective values are recorded;
+3. config `eval.n_splits` / `eval.n_repeats` / `n_perm`;
+4. full defaults: 5 splits × 10 repeats and 100 permutations.
 
-Other settings: CLI flag > config value > default. Unknown config keys, non-integer or out-of-range `eval` values, an `eval.seed` that disagrees with `seed`, and a non-default `persistent_error_threshold` (not configurable) are rejected before any output is written. `results.json["config"]["eval"]` holds the effective values; `config.settings_resolution` records the source of each `eval` value, any notes, and the config file path with its LF-normalized SHA-256.
+Smoke does **not** override an explicit CLI `--n-perm` (or `--n-splits` / `--n-repeats`). It is therefore not true that every CLI flag always beats smoke, or that smoke always beats every CLI flag: smoke replaces unspecified eval/perm settings only.
+
+Other settings: CLI flag > config value > default. `scope` is only `primary` or `sensitivity` (typos are rejected, not coerced). `sensitivity_policy` is only `raw`, `quarantine_out_of_range`, or `grouped_duplicates`. Integers (`seed`, `n_perm`, limits) reject bools, floats and numeric strings. `n_perm` must be ≥ 1; 0 is not treated as “skip the experiment”. Seed plus `n_repeats-1` must stay inside the sklearn/numpy seed range `[0, 2**32)`. Unknown keys, a conflicting `eval.seed`, and a non-default `persistent_error_threshold` are rejected **before** the output directory is created. Loading `--config` requires PyYAML; empty files and non-mapping roots (`[]`, `false`) are errors.
+
+`results.json["config"]` stores the effective values; `config.settings_resolution.sources` records where each value came from.
 
 Outputs: `results.json`, `folds.csv`, `fold_scores.csv`, `repeat_scores.csv`, `oof_predictions.csv`, permutations, parse_issues, requirements-lock (non-empty), hashes for lock + code manifest.
 
-**Experiment B** (nested LR/SVM/RF/XGB search): still a **stub** in `scripts/run_benchmark.py` — not completed.
+`grouped_duplicates` uses `StratifiedGroupKFold` for **outer and inner** splits (`inner_folds.csv` records group isolation). The primary permutation test (row-wise `StratifiedKFold(5)`) is unchanged. Under `grouped_duplicates` the permutation experiment is **`not_available`**: identical-feature groups are not confirmed subjects, and a group-level label permutation has not been justified. Do not read a missing `permutations.csv` in that mode as a completed test.
+
+**Experiment B** (nested LR/SVM/RF/XGB search): still a **stub** in `scripts/run_benchmark.py` — not completed. That script also requires an explicit empty output directory.
 
 ## Run provenance
 

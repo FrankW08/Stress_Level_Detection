@@ -16,7 +16,8 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import RepeatedStratifiedKFold, StratifiedGroupKFold
 
-from stress_detection.models import ModelFactory, estimator_params
+from stress_detection.models import NestedBestSingleFeature, ModelFactory, estimator_params
+from stress_detection.run_config import ConfigError
 
 
 @dataclass
@@ -53,6 +54,73 @@ def outer_splits(
         random_state=cfg.seed,
     )
     return list(rskf.split(X_dummy, y))
+
+
+def check_split_feasibility(
+    y: np.ndarray,
+    n_splits: int,
+    *,
+    groups: np.ndarray | None = None,
+    name: str = "n_splits",
+) -> None:
+    """Raise ConfigError if a stratified (group) split cannot be built."""
+    y = np.asarray(y)
+    if len(y) == 0:
+        raise ConfigError("included sample is empty")
+    classes, counts = np.unique(y, return_counts=True)
+    if len(classes) < 2:
+        raise ConfigError(
+            f"{name}={n_splits} not feasible: included sample has {len(classes)} class(es) "
+            f"(values={classes.tolist()})"
+        )
+    min_class = int(counts.min())
+    if n_splits > min_class:
+        raise ConfigError(
+            f"{name}={n_splits} exceeds the smallest class count ({min_class}); "
+            f"class counts={dict(zip(classes.tolist(), counts.tolist()))}"
+        )
+    if groups is not None:
+        n_groups = int(len(np.unique(groups)))
+        if n_splits > n_groups:
+            raise ConfigError(
+                f"{name}={n_splits} exceeds n_groups={n_groups}; "
+                "refusing to fall back to ungrouped CV"
+            )
+
+
+def validate_generated_splits(
+    splits: list[tuple[np.ndarray, np.ndarray]],
+    *,
+    groups: np.ndarray | None,
+    name: str,
+) -> None:
+    if not splits:
+        raise ConfigError(f"{name}: no splits were generated")
+    for i, (tr, te) in enumerate(splits):
+        if len(tr) == 0 or len(te) == 0:
+            raise ConfigError(f"{name} fold {i}: empty train or valid set")
+        if groups is not None:
+            overlap = set(groups[tr]) & set(groups[te])
+            if overlap:
+                raise ConfigError(
+                    f"{name} fold {i}: train/valid groups overlap ({sorted(overlap)[:8]})"
+                )
+
+
+def plan_outer_splits(
+    y: np.ndarray,
+    cfg: EvalConfig,
+    *,
+    groups: np.ndarray | None = None,
+    inner_splits: int = 3,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    check_split_feasibility(y, cfg.n_splits, groups=groups, name="n_splits")
+    outer = outer_splits(len(y), y, cfg, groups=groups)
+    validate_generated_splits(outer, groups=groups, name="outer CV")
+    for i, (tr, _) in enumerate(outer):
+        gtr = groups[tr] if groups is not None else None
+        check_split_feasibility(y[tr], inner_splits, groups=gtr, name="nested_single.inner_splits")
+    return outer
 
 
 def per_class_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
@@ -242,6 +310,13 @@ def summarize_repeat_scores(rs: pd.DataFrame) -> dict[str, Any]:
     return summary
 
 
+def _fit_estimator(est: Any, X_tr: pd.DataFrame, y_tr: np.ndarray, groups_tr: np.ndarray | None):
+    """Pass groups only to NestedBestSingleFeature; never to generic Pipelines."""
+    if isinstance(est, NestedBestSingleFeature) and groups_tr is not None:
+        return est.fit(X_tr, y_tr, groups=groups_tr)
+    return est.fit(X_tr, y_tr)
+
+
 def run_audit_cv(
     X: pd.DataFrame,
     y: np.ndarray,
@@ -250,10 +325,13 @@ def run_audit_cv(
     cfg: EvalConfig,
     *,
     groups: np.ndarray | None = None,
+    outer: list[tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> dict[str, Any]:
-    outer = outer_splits(len(y), y, cfg, groups=groups)
+    if outer is None:
+        outer = plan_outer_splits(y, cfg, groups=groups)
     fold_rows: list[dict] = []
     inner_rows: list[dict] = []
+    inner_fold_rows: list[dict] = []
     n_folds = len(outer)
     oof = {k: np.full((cfg.n_repeats, len(y)), -1, dtype=int) for k in models}
     fold_membership: list[dict] = []
@@ -262,29 +340,32 @@ def run_audit_cv(
     for f_idx, (tr, te) in enumerate(outer):
         rep, fold = divmod(f_idx, cfg.n_splits)
         for i in tr:
-            fold_membership.append(
-                {
-                    "repeat": rep,
-                    "fold": fold,
-                    "source_row_id": int(source_row_ids[i]),
-                    "role": "train",
-                }
-            )
+            row = {
+                "repeat": rep,
+                "fold": fold,
+                "source_row_id": int(source_row_ids[i]),
+                "role": "train",
+            }
+            if groups is not None:
+                row["group_id"] = int(groups[i])
+            fold_membership.append(row)
         for i in te:
-            fold_membership.append(
-                {
-                    "repeat": rep,
-                    "fold": fold,
-                    "source_row_id": int(source_row_ids[i]),
-                    "role": "valid",
-                }
-            )
+            row = {
+                "repeat": rep,
+                "fold": fold,
+                "source_row_id": int(source_row_ids[i]),
+                "role": "valid",
+            }
+            if groups is not None:
+                row["group_id"] = int(groups[i])
+            fold_membership.append(row)
 
+        groups_tr = groups[tr] if groups is not None else None
         for name, (factory, cols) in models.items():
             est = factory()
             if name not in model_params:
                 model_params[name] = estimator_params(est)
-            est.fit(X.iloc[tr][cols], y[tr])
+            _fit_estimator(est, X.iloc[tr][cols], y[tr], groups_tr)
             pred = est.predict(X.iloc[te][cols])
             oof[name][rep, te] = pred
             metrics = per_class_metrics(y[te], pred)
@@ -307,6 +388,23 @@ def run_audit_cv(
                             "inner_macro_f1": score,
                         }
                     )
+                if hasattr(est, "inner_splits_used_"):
+                    for inner_k, (itr, ite) in enumerate(est.inner_splits_used_):
+                        for local_i, role in (
+                            *((int(j), "train") for j in itr),
+                            *((int(j), "valid") for j in ite),
+                        ):
+                            global_i = int(tr[local_i])
+                            inner_row = {
+                                "repeat": rep,
+                                "fold": fold,
+                                "inner_fold": inner_k,
+                                "source_row_id": int(source_row_ids[global_i]),
+                                "role": role,
+                            }
+                            if groups is not None:
+                                inner_row["group_id"] = int(groups[global_i])
+                            inner_fold_rows.append(inner_row)
 
     fs = pd.DataFrame(fold_rows)
     rs = repeat_oof_scores(oof, y)
@@ -315,6 +413,7 @@ def run_audit_cv(
         "repeat_scores": rs,
         "repeat_summary": summarize_repeat_scores(rs),
         "inner_candidates": pd.DataFrame(inner_rows),
+        "inner_folds": pd.DataFrame(inner_fold_rows),
         "folds": pd.DataFrame(fold_membership),
         "oof": oof,
         "summary": summarize_fold_scores(fs),
