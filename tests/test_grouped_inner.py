@@ -11,7 +11,7 @@ import pytest
 
 from sklearn.dummy import DummyClassifier
 
-from stress_detection.evaluation import EvalConfig, run_audit_cv
+from stress_detection.evaluation import EvalConfig, plan_cv, run_audit_cv
 from stress_detection.models import NestedBestSingleFeature, grouped_inner_splits
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +27,7 @@ def _synthetic_grouped(n_groups: int = 12) -> tuple[pd.DataFrame, np.ndarray, np
     for g in range(n_groups):
         label = g % 3
         feat = float(g)
-        for _ in range(2):
+        for _ in range(4):
             rows.append({"f1": feat, "f2": feat + 0.1, "f3": 1.0})
             y.append(label)
             groups.append(g)
@@ -38,7 +38,7 @@ def _synthetic_grouped(n_groups: int = 12) -> tuple[pd.DataFrame, np.ndarray, np
 
 
 def test_grouped_outer_and_inner_groups_disjoint():
-    X, y, ids, groups = _synthetic_grouped()
+    X, y, ids, groups = _synthetic_grouped(n_groups=18)
     models = {
         "nested_single": (
             lambda: NestedBestSingleFeature(random_state=0, inner_splits=2),
@@ -47,7 +47,17 @@ def test_grouped_outer_and_inner_groups_disjoint():
         "dummy": (lambda: DummyClassifier(strategy="most_frequent"), list(X.columns)),
     }
     cfg = EvalConfig(n_splits=2, n_repeats=1, seed=0)
-    out = run_audit_cv(X, y, ids, models, cfg, groups=groups)
+    plan = plan_cv(y, cfg, groups=groups, inner_splits=2)
+    out = run_audit_cv(
+        X,
+        y,
+        ids,
+        models,
+        cfg,
+        groups=groups,
+        outer=plan.outer,
+        inner_by_outer=plan.inner,
+    )
     folds = out["folds"]
     inner = out["inner_folds"]
     assert "group_id" in folds.columns

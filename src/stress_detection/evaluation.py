@@ -14,9 +14,14 @@ from sklearn.metrics import (
     f1_score,
     precision_recall_fscore_support,
 )
-from sklearn.model_selection import RepeatedStratifiedKFold, StratifiedGroupKFold
+from sklearn.model_selection import RepeatedStratifiedKFold, StratifiedGroupKFold, StratifiedKFold
 
-from stress_detection.models import NestedBestSingleFeature, ModelFactory, estimator_params
+from stress_detection.cv_protocol import (
+    PROTOCOL_LABELS,
+    ZERO_DIVISION,
+    validate_generated_splits,
+)
+from stress_detection.models import NestedBestSingleFeature, ModelFactory, estimator_params, grouped_inner_splits
 from stress_detection.run_config import ConfigError
 
 
@@ -88,23 +93,74 @@ def check_split_feasibility(
             )
 
 
-def validate_generated_splits(
-    splits: list[tuple[np.ndarray, np.ndarray]],
+@dataclass
+class CVPlan:
+    outer: list[tuple[np.ndarray, np.ndarray]]
+    inner: list[list[tuple[np.ndarray, np.ndarray]]]
+    inner_splits: int
+
+
+def generate_inner_splits(
+    n_train: int,
+    y_train: np.ndarray,
     *,
-    groups: np.ndarray | None,
-    name: str,
-) -> None:
-    if not splits:
-        raise ConfigError(f"{name}: no splits were generated")
-    for i, (tr, te) in enumerate(splits):
-        if len(tr) == 0 or len(te) == 0:
-            raise ConfigError(f"{name} fold {i}: empty train or valid set")
-        if groups is not None:
-            overlap = set(groups[tr]) & set(groups[te])
-            if overlap:
-                raise ConfigError(
-                    f"{name} fold {i}: train/valid groups overlap ({sorted(overlap)[:8]})"
-                )
+    n_splits: int,
+    random_state: int,
+    groups_train: np.ndarray | None = None,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Inner splits on one outer training fold (local indices 0..n_train-1).
+
+    Ungrouped generation matches NestedBestSingleFeature's StratifiedKFold
+    (shuffle=True, random_state=model seed).
+    """
+    y_train = np.asarray(y_train)
+    X_dummy = np.zeros((n_train, 1))
+    if groups_train is None:
+        inner = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+        splits = list(inner.split(X_dummy, y_train))
+        validate_generated_splits(splits, y_train, groups=None, name="nested_single inner CV")
+        return splits
+    dummy = pd.DataFrame(X_dummy)
+    return grouped_inner_splits(
+        dummy, y_train, np.asarray(groups_train), n_splits=n_splits, random_state=random_state
+    )
+
+
+def plan_cv(
+    y: np.ndarray,
+    cfg: EvalConfig,
+    *,
+    groups: np.ndarray | None = None,
+    inner_splits: int = 3,
+) -> CVPlan:
+    """Generate and validate outer and inner splits before any model fitting."""
+    check_split_feasibility(y, cfg.n_splits, groups=groups, name="n_splits")
+    missing = [c for c in PROTOCOL_LABELS if int(np.sum(np.asarray(y) == c)) == 0]
+    if missing:
+        raise ConfigError(
+            f"included sample missing required class(es) {missing}; "
+            f"class counts={ {c: int(np.sum(np.asarray(y) == c)) for c in PROTOCOL_LABELS} }. "
+            f"This audit uses a 3-class protocol with labels {list(PROTOCOL_LABELS)}."
+        )
+    outer = outer_splits(len(y), y, cfg, groups=groups)
+    validate_generated_splits(outer, y, groups=groups, name="outer CV")
+    inner_all: list[list[tuple[np.ndarray, np.ndarray]]] = []
+    for i, (tr, _) in enumerate(outer):
+        ytr = y[tr]
+        gtr = groups[tr] if groups is not None else None
+        check_split_feasibility(ytr, inner_splits, groups=gtr, name="nested_single.inner_splits")
+        inner = generate_inner_splits(
+            len(tr),
+            ytr,
+            n_splits=inner_splits,
+            random_state=cfg.seed,
+            groups_train=gtr,
+        )
+        validate_generated_splits(
+            inner, ytr, groups=gtr, name=f"outer fold {i} inner CV"
+        )
+        inner_all.append(inner)
+    return CVPlan(outer=outer, inner=inner_all, inner_splits=inner_splits)
 
 
 def plan_outer_splits(
@@ -114,19 +170,13 @@ def plan_outer_splits(
     groups: np.ndarray | None = None,
     inner_splits: int = 3,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
-    check_split_feasibility(y, cfg.n_splits, groups=groups, name="n_splits")
-    outer = outer_splits(len(y), y, cfg, groups=groups)
-    validate_generated_splits(outer, groups=groups, name="outer CV")
-    for i, (tr, _) in enumerate(outer):
-        gtr = groups[tr] if groups is not None else None
-        check_split_feasibility(y[tr], inner_splits, groups=gtr, name="nested_single.inner_splits")
-    return outer
+    return plan_cv(y, cfg, groups=groups, inner_splits=inner_splits).outer
 
 
 def per_class_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
-    labels = [0, 1, 2]
+    labels = list(PROTOCOL_LABELS)
     p, r, f1, sup = precision_recall_fscore_support(
-        y_true, y_pred, labels=labels, zero_division=0
+        y_true, y_pred, labels=labels, zero_division=ZERO_DIVISION
     )
     out: dict[str, Any] = {}
     for i, lab in enumerate(labels):
@@ -137,7 +187,9 @@ def per_class_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
             "support": int(sup[i]),
         }
     out["accuracy"] = float(accuracy_score(y_true, y_pred))
-    out["macro_f1"] = float(f1_score(y_true, y_pred, average="macro"))
+    out["macro_f1"] = float(
+        f1_score(y_true, y_pred, average="macro", labels=labels, zero_division=ZERO_DIVISION)
+    )
     out["confusion_matrix"] = confusion_matrix(y_true, y_pred, labels=labels).tolist()
     cm = np.array(out["confusion_matrix"])
     denom = int((y_true == 0).sum() + (y_true == 2).sum())
@@ -310,10 +362,21 @@ def summarize_repeat_scores(rs: pd.DataFrame) -> dict[str, Any]:
     return summary
 
 
-def _fit_estimator(est: Any, X_tr: pd.DataFrame, y_tr: np.ndarray, groups_tr: np.ndarray | None):
-    """Pass groups only to NestedBestSingleFeature; never to generic Pipelines."""
-    if isinstance(est, NestedBestSingleFeature) and groups_tr is not None:
-        return est.fit(X_tr, y_tr, groups=groups_tr)
+def _fit_estimator(
+    est: Any,
+    X_tr: pd.DataFrame,
+    y_tr: np.ndarray,
+    groups_tr: np.ndarray | None,
+    inner_cv: list[tuple[np.ndarray, np.ndarray]] | None = None,
+):
+    """Pass groups/inner_cv only to NestedBestSingleFeature; never to generic Pipelines."""
+    if isinstance(est, NestedBestSingleFeature):
+        kwargs: dict[str, Any] = {}
+        if groups_tr is not None:
+            kwargs["groups"] = groups_tr
+        if inner_cv is not None:
+            kwargs["inner_cv"] = inner_cv
+        return est.fit(X_tr, y_tr, **kwargs)
     return est.fit(X_tr, y_tr)
 
 
@@ -326,9 +389,12 @@ def run_audit_cv(
     *,
     groups: np.ndarray | None = None,
     outer: list[tuple[np.ndarray, np.ndarray]] | None = None,
+    inner_by_outer: list[list[tuple[np.ndarray, np.ndarray]]] | None = None,
 ) -> dict[str, Any]:
-    if outer is None:
-        outer = plan_outer_splits(y, cfg, groups=groups)
+    if outer is None or inner_by_outer is None:
+        plan = plan_cv(y, cfg, groups=groups)
+        outer = plan.outer
+        inner_by_outer = plan.inner
     fold_rows: list[dict] = []
     inner_rows: list[dict] = []
     inner_fold_rows: list[dict] = []
@@ -365,7 +431,13 @@ def run_audit_cv(
             est = factory()
             if name not in model_params:
                 model_params[name] = estimator_params(est)
-            _fit_estimator(est, X.iloc[tr][cols], y[tr], groups_tr)
+            _fit_estimator(
+                est,
+                X.iloc[tr][cols],
+                y[tr],
+                groups_tr,
+                inner_cv=inner_by_outer[f_idx] if name == "nested_single" else None,
+            )
             pred = est.predict(X.iloc[te][cols])
             oof[name][rep, te] = pred
             metrics = per_class_metrics(y[te], pred)
@@ -466,5 +538,13 @@ def metrics_from_oof(
     """Recompute accuracy / macro-F1 from a single OOF vector."""
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
-        "macro_f1": float(f1_score(y_true, y_pred, average="macro")),
+        "macro_f1": float(
+            f1_score(
+                y_true,
+                y_pred,
+                average="macro",
+                labels=list(PROTOCOL_LABELS),
+                zero_division=ZERO_DIVISION,
+            )
+        ),
     }

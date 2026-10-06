@@ -12,7 +12,7 @@ Current results support **prediction of the `stress_level` column that is alread
 - `grouped_duplicates` groups **identical feature vectors**, not known subjects.
 - Conflict groups, domain-rule violations and persistent-error flags are audit findings, **not** confirmed mislabels.
 - **Invalid historical scores:** Old Notebook SVM figures near **94%** used **label-driven zero imputation** and other leakage; old LR figures near **88%** are **not** verified benchmarks.
-- Experiment B (nested hyperparameter search) is still a stub. There is no external validation set. See `RESEARCH_TODO.md`.
+- Experiment B (nested hyperparameter search) is **designed, not executed**. See `docs/RESEARCH_PLAN.md`. There is no external validation set. Provenance checklist: `docs/DATA_PROVENANCE.md`. Open questions: `RESEARCH_TODO.md`.
 
 ## Data and line endings
 
@@ -23,7 +23,7 @@ Current results support **prediction of the `stress_level` column that is alread
 - Each `results.json` records both `csv_sha256_raw` and `csv_sha256_normalized_lf`.
 - **Primary scope:** `source_row_id` 0–1099, valid labels only → **1098 rows**.
 - **Sensitivity scope:** `--scope sensitivity` with `--sensitivity-policy` (`raw` | `quarantine_out_of_range` | `grouped_duplicates`). Provisional range bounds are **not** a confirmed data dictionary.
-- See `DATA_CARD.md`.
+- See `DATA_CARD.md` and `docs/DATA_PROVENANCE.md`.
 
 ## Install
 
@@ -37,13 +37,17 @@ python -m pip install -e ".[dev,benchmark]"
 
 `uv.lock` pins the environment when using uv.
 
-## Tests
+## Tests and CI
 
 ```bash
 python -m pytest -q
 ```
 
-Tests write only under pytest `tmp_path` (no new files under `results/`).
+Tests write only under pytest `tmp_path` (no new files under `results/`). Primary and grouped smoke paths are already covered there; do not add a second full smoke in CI.
+
+`.github/workflows/ci.yml` (push / pull request): install with `uv sync --frozen --extra dev` (Python 3.12, lockfile, no resolver), run pytest, then fail if the working tree is dirty or if `StressLevelDataset_original.csv` / `results/` changed. Push/PR CI does **not** run 100 permutations or Experiment B search.
+
+`workflow_dispatch` can run a full Experiment A audit into `/tmp` and upload it as an artifact (not committed). Adding the workflow file does **not** mean a remote GitHub Actions run has passed.
 
 `tests/test_oof_consistency.py` recomputes fold- and repeat-level metrics from the saved OOF predictions with scikit-learn and checks coverage and confusion matrices. It replaces `test_oof_metrics_match_fold_means` (removed in `314c444`), which lacked substantive consistency assertions: it only checked that the fold mean in `fold_scores.csv` matched `results.json` and that the pooled OOF macro-F1 lay in [0, 1]. It never required pooled OOF F1 to equal the fold mean (the `314c444` commit message describes it that way inaccurately).
 
@@ -195,6 +199,14 @@ A run on commit `066ea2b` with uncommitted changes (`dirty: true`, correctly rec
 - Label-invariance tests: clean adapter ignores `y_valid`; deliberate leaky adapter must fail.
 - `stress_level` is never a feature; production predict takes `X` only.
 
+## Experiment B (design only)
+
+`scripts/run_benchmark.py <empty_out_dir>` writes `benchmark_status.json` (`status: design_only_not_executed`). It does **not** run nested search. Search space, fit budget, and pre-specified comparisons: `docs/RESEARCH_PLAN.md` and `src/stress_detection/experiment_b.py`.
+
+## 3-class protocol
+
+Primary metrics use labels `[0, 1, 2]` and `zero_division=0`. Every outer and inner train/valid fold must contain all three classes; grouped CV also requires group isolation. Failure raises an error (no silent fallback to ungrouped CV, no seed search). The persistent-error auxiliary classifier is **binary** and uses its own labels.
+
 ## Notebook
 
 `Stress Level Classification.ipynb` — cleared outputs; uses `prepare_data` + package pipelines. Authority: `run_audit.py`. Optional XGBoost via `[benchmark]`.
@@ -205,6 +217,7 @@ python -m jupyter nbconvert --to notebook --execute "Stress Level Classification
 
 ## Roadmap (not done)
 
-- Source-file lineage / label generation audit.
-- Full Experiment B nested search.
-- Explanation stability, learning curves, external validation.
+- Hash comparison of this CSV against candidate public dumps (`docs/DATA_PROVENANCE.md`).
+- Execute Experiment B as specified (`docs/RESEARCH_PLAN.md`); do not expand the model set by default.
+- Optional formal sensitivity full runs into **new** directories.
+- Explanation stability, learning curves, external validation only after codebook-level comparability.

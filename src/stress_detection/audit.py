@@ -30,13 +30,14 @@ from stress_detection.data import (
     parse_dataset,
     prepare_data,
 )
+from stress_detection.cv_protocol import MACRO_F1_PROTOCOL, PROTOCOL_LABELS, ZERO_DIVISION
 from stress_detection.evaluation import (
     FOLD_AGGREGATION,
     REPEAT_AGGREGATION,
     EvalConfig,
     check_split_feasibility,
     paired_comparison,
-    plan_outer_splits,
+    plan_cv,
     run_audit_cv,
 )
 from stress_detection.hashes import (
@@ -181,7 +182,7 @@ def run_permutations(
             StratifiedKFold(PERMUTATION_N_SPLITS, shuffle=True, random_state=seed).split(X, lab)
         )
         clean = float(
-            cross_val_score(svm_linear_pipeline(), X, lab, cv=cv, scoring="f1_macro").mean()
+            cross_val_score(svm_linear_pipeline(), X, lab, cv=cv, scoring=MACRO_F1_PROTOCOL).mean()
         )
         leaky = float(
             cross_val_score(
@@ -189,7 +190,7 @@ def run_permutations(
                 apply_label_driven_zero_map(X, lab),
                 lab,
                 cv=cv,
-                scoring="f1_macro",
+                scoring=MACRO_F1_PROTOCOL,
             ).mean()
         )
         return clean, leaky
@@ -271,6 +272,7 @@ def describe_persistent_flags(
         DecisionTreeClassifier(max_depth=3, random_state=seed),
     )
     dp = cross_val_predict(pipe, X, flag, cv=desc_cv)
+    # Binary flag vs not; do not reuse the 3-class PROTOCOL_LABELS [0, 1, 2].
     pr, rc, f1, _ = precision_recall_fscore_support(flag, dp, labels=[1], zero_division=0)
     return {
         **base,
@@ -433,6 +435,7 @@ def run_full_audit(
     models = audit_model_registry(prep.feature_names, random_state=cfg.seed)
 
     outer: list = []
+    inner_by_outer: list | None = None
     perm_protocol = permutation_protocol(
         seed=cfg.seed,
         n_perm=n_perm,
@@ -440,7 +443,9 @@ def run_full_audit(
         run_generalization=run_generalization,
     )
     if run_generalization:
-        outer = plan_outer_splits(y, cfg, groups=groups)
+        plan = plan_cv(y, cfg, groups=groups)
+        outer = plan.outer
+        inner_by_outer = plan.inner
         if perm_protocol["status"] == "completed":
             check_split_feasibility(y, PERMUTATION_N_SPLITS, name="permutation.n_splits")
 
@@ -459,7 +464,14 @@ def run_full_audit(
     cv_out: dict[str, Any] | None = None
     if run_generalization:
         cv_out = run_audit_cv(
-            X, y, prep.source_row_ids, models, cfg, groups=groups, outer=outer
+            X,
+            y,
+            prep.source_row_ids,
+            models,
+            cfg,
+            groups=groups,
+            outer=outer,
+            inner_by_outer=inner_by_outer,
         )
 
     prep.exclusions.to_csv(out_dir / "exclusions.csv", index=False, encoding="utf-8")
@@ -540,7 +552,13 @@ def run_full_audit(
                         X.iloc[tr][[c]], y[tr]
                     )
                     scores.append(
-                        f1_score(y[te], m.predict(X.iloc[te][[c]]), average="macro")
+                        f1_score(
+                            y[te],
+                            m.predict(X.iloc[te][[c]]),
+                            average="macro",
+                            labels=list(PROTOCOL_LABELS),
+                            zero_division=ZERO_DIVISION,
+                        )
                     )
                 exploratory[c] = float(np.mean(scores))
     else:

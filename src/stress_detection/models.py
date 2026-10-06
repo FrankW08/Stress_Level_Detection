@@ -17,6 +17,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 
+from stress_detection.cv_protocol import MACRO_F1_PROTOCOL, validate_generated_splits
+
 DEFAULT_SEED = 0
 PSYCH_FEATURES = ["anxiety_level", "self_esteem", "mental_health_history", "depression"]
 
@@ -127,13 +129,9 @@ def grouped_inner_splits(
             f"inner_splits={n_splits} is not feasible for grouped inner CV "
             f"(n_groups={n_groups}): {exc}. Refusing to fall back to ungrouped StratifiedKFold"
         ) from exc
-    for fold_i, (tr, te) in enumerate(splits):
-        overlap = set(groups[tr]) & set(groups[te])
-        if overlap:
-            raise ValueError(
-                f"inner fold {fold_i}: train/valid groups overlap ({sorted(overlap)[:8]}); "
-                "refusing to continue"
-            )
+    validate_generated_splits(
+        splits, np.asarray(y), groups=np.asarray(groups), name="grouped inner CV"
+    )
     return splits
 
 
@@ -144,14 +142,26 @@ class NestedBestSingleFeature(BaseEstimator, ClassifierMixin):
         self.random_state = random_state
         self.inner_splits = inner_splits
 
-    def fit(self, X: pd.DataFrame, y: np.ndarray, groups: np.ndarray | None = None):
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        groups: np.ndarray | None = None,
+        inner_cv: list[tuple[np.ndarray, np.ndarray]] | None = None,
+    ):
         X = pd.DataFrame(X)
         y = np.asarray(y)
-        if groups is None:
+        if inner_cv is not None:
+            cv_splits = [(np.asarray(tr), np.asarray(te)) for tr, te in inner_cv]
+            validate_generated_splits(
+                cv_splits, y, groups=groups, name="nested_single inner CV"
+            )
+        elif groups is None:
             inner = StratifiedKFold(
                 n_splits=self.inner_splits, shuffle=True, random_state=self.random_state
             )
             cv_splits = list(inner.split(X, y))
+            validate_generated_splits(cv_splits, y, groups=None, name="nested_single inner CV")
         else:
             groups = np.asarray(groups)
             if len(groups) != len(X):
@@ -170,7 +180,7 @@ class NestedBestSingleFeature(BaseEstimator, ClassifierMixin):
                 X[[col]],
                 y,
                 cv=cv_splits,
-                scoring="f1_macro",
+                scoring=MACRO_F1_PROTOCOL,
             )
             self.candidates_[col] = float(scores.mean())
         self.feature_ = tie_break_feature(self.candidates_)

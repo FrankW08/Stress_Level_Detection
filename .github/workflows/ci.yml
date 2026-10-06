@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_full_audit:
+        description: "Run Experiment A full audit (5x10, 100 permutations) and upload artifacts"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+      - name: Tests (includes primary and grouped smoke under tmp_path)
+        run: uv run --frozen python -m pytest -q
+      - name: Working tree must stay clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "tests left tracked or untracked files:"
+            git status --porcelain
+            exit 1
+          fi
+      - name: Historical results and CSV unchanged
+        run: git diff --exit-code -- StressLevelDataset_original.csv results/
+
+  full-audit:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_full_audit == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+      - name: Full Experiment A audit into a new directory
+        run: |
+          out="ci_audit_${GITHUB_SHA}"
+          uv run --frozen python scripts/run_audit.py \
+            StressLevelDataset_original.csv \
+            "/tmp/${out}" \
+            --n-perm 100 --seed 0 --config configs/audit_primary.yaml
+      - name: Upload audit artifact (not committed)
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-full-${{ github.sha }}
+          path: /tmp/ci_audit_${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14

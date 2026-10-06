@@ -108,7 +108,7 @@ def test_benchmark_rejects_nonempty(tmp_path):
     d.mkdir()
     (d / "old.json").write_text("{}", encoding="utf-8")
     proc = subprocess.run(
-        [sys.executable, str(BENCH), str(CSV), str(d)],
+        [sys.executable, str(BENCH), str(d)],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -116,3 +116,17 @@ def test_benchmark_rejects_nonempty(tmp_path):
     assert proc.returncode != 0
     assert "not empty" in proc.stderr
     assert (d / "old.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_benchmark_writes_design_only(tmp_path):
+    d = tmp_path / "bench_empty"
+    proc = subprocess.run(
+        [sys.executable, str(BENCH), str(d)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    status = json.loads((d / "benchmark_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "design_only_not_executed"
+    assert status["budget"]["total_search_fits"] == 2250

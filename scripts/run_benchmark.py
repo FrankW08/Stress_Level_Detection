@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Experiment B: nested hyperparameter search (optional; not run by default in CI)."""
+"""Experiment B nested search — design dump only; does not run the search."""
 
 from __future__ import annotations
 
@@ -11,33 +11,28 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from stress_detection.data import prepare_data
-from stress_detection.evaluation import EvalConfig, run_audit_cv
+from stress_detection.experiment_b import experiment_b_status
 from stress_detection.io_guard import OutputDirError, ensure_empty_output_dir, write_run_status
-from stress_detection.models import audit_model_registry
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Benchmark B placeholder — LR/SVM/RF/XGB nested search",
+        description="Experiment B: write nested-search design (search is not executed)",
         epilog=(
             "The output directory is required and must be new or empty. "
-            "Example: python scripts/run_benchmark.py StressLevelDataset_original.csv "
-            "results/benchmark_new"
+            "Example: python scripts/run_benchmark.py results/benchmark_design"
         ),
-    )
-    parser.add_argument(
-        "csv",
-        type=Path,
-        nargs="?",
-        default=ROOT / "StressLevelDataset_original.csv",
     )
     parser.add_argument(
         "out_dir",
         type=Path,
         help="Output directory (required). Must not already contain files.",
     )
-    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Accepted for compatibility; still does not run the nested search.",
+    )
     args = parser.parse_args()
 
     try:
@@ -46,22 +41,11 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     write_run_status(out, "in_progress", experiment="B")
-    status = {
-        "status": "not_implemented_full_nested_search",
-        "note": (
-            "Use run_audit.py for experiment A. Benchmark B requires shared outer folds "
-            "+ inner GridSearch; this script does not perform that search."
-        ),
-        "smoke_ran_audit_subset": bool(args.smoke),
-    }
-    if args.smoke:
-        prep = prepare_data(args.csv.resolve(), scope="primary")
-        cfg = EvalConfig(n_splits=3, n_repeats=1)
-        models = audit_model_registry(prep.feature_names)
-        cv = run_audit_cv(prep.X, prep.y, prep.source_row_ids, models, cfg)
-        status["smoke_summary"] = cv["summary"]
+    status = experiment_b_status()
+    status["smoke_flag"] = bool(args.smoke)
+    status["plan_doc"] = "docs/RESEARCH_PLAN.md"
     (out / "benchmark_status.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
-    write_run_status(out, "completed", experiment="B", note="stub only")
+    write_run_status(out, "completed", experiment="B", note="design only; search not executed")
     print(json.dumps(status, indent=2))
     return 0
 

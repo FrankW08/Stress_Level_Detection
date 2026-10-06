@@ -50,7 +50,7 @@ Most Likert-style items use **0–5** unless noted. Zero means the lowest catego
 
 ## Open questions (unverified)
 
-These are **not** established facts. See `RESEARCH_TODO.md`.
+These are **not** established facts. Structured checklist: `docs/DATA_PROVENANCE.md`. Short list: `RESEARCH_TODO.md`.
 
 - How `stress_level` was generated (self-report, sum of items, researcher coding, or something else).
 - The original source file, collection protocol, and any ethics review.
