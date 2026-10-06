@@ -68,7 +68,7 @@ python scripts/run_audit.py StressLevelDataset_original.csv /tmp/audit_sens --sm
 
 ### Formal full run (clean working tree only)
 
-The audit runs only if git succeeds, `git status --porcelain` prints nothing (no modified, staged or untracked files), and the output directory does not exist yet. The program itself also refuses a non-empty output directory. Each run writes to a new directory; `results/audit_full` and `results/audit_full_d12aa67_clean` are never overwritten.
+The audit runs only if git succeeds, `git status --porcelain` prints nothing (no modified, staged or untracked files), and the output directory does not exist yet. The program itself also refuses a non-empty output directory. Each run writes to a new directory; `results/audit_full`, `results/audit_full_d12aa67_clean` and `results/audit_full_4865bb3_clean` are never overwritten.
 
 PowerShell:
 
@@ -143,9 +143,9 @@ Two summaries are reported; both are legitimate, they answer different questions
 - Confusion matrices summed over repeats count each sample once per repeat (10× in total); that total is not a number of independent samples.
 - Paired model comparisons (`paired`) use per-fold paired differences with a Nadeau–Bengio-style corrected variance and df = 49. The result is an **approximate corrected interval**, not an exact one. An interval that contains 0 means the difference is not resolved under this protocol; it does **not** show the models are equivalent.
 
-## Formal full audit (`results/audit_full_d12aa67_clean`)
+## Formal full audit (`results/audit_full_4865bb3_clean`)
 
-Run from a clean working tree at commit `d12aa67` (`git.dirty: false`, `git_state_capture: "run_start"`), seed=0, 5 folds × 10 repeats from `configs/audit_primary.yaml`, 100 permutations, 1098 primary-scope rows. Fold-level metrics, OOF predictions, fold membership, exclusions, inner candidates and permutations are identical to `results/audit_full`.
+Run from a clean working tree at commit `4865bb3` (`git.dirty: false`, `git_state_capture: "run_start"`), seed=0, 5 folds × 10 repeats from `configs/audit_primary.yaml`, 100 permutations, 1098 primary-scope rows. Fold-level metrics, OOF predictions, fold membership, exclusions, inner candidates and permutations are identical to `results/audit_full` and to `results/audit_full_d12aa67_clean`.
 
 | Model | fold-level macro-F1 (50 folds) | repeat-level macro-F1 (10 repeats) | repeat-level accuracy | repeat-level 0↔2 error rate |
 |-------|------|------|------|------|
