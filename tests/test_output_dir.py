@@ -129,4 +129,7 @@ def test_benchmark_writes_design_only(tmp_path):
     assert proc.returncode == 0, proc.stderr
     status = json.loads((d / "benchmark_status.json").read_text(encoding="utf-8"))
     assert status["status"] == "design_only_not_executed"
-    assert status["budget"]["total_search_fits"] == 2250
+    assert status["budget"]["inner_cv_fits_total"] == 2100
+    assert status["budget"]["family_outer_train_refits_total"] == 150
+    assert status["budget"]["search_plus_family_refit_total"] == 2250
+    assert status["pre_specified_comparisons"][-1] == ["b_select", "lr_all"]

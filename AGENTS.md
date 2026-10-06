@@ -7,7 +7,8 @@
 - Output directory is required and must be new or empty; the program refuses to write into a non-empty directory.
 - 3-class protocol: labels `[0,1,2]`, `zero_division=0`, every outer/inner train and valid fold must cover all three classes. Fail clearly; do not fall back to ungrouped CV or resample seeds. Generate and validate splits before creating the output directory; training must reuse those splits.
 - Persistent-error auxiliary classifier is binary; do not apply `[0,1,2]` to it.
-- Experiment B: design only this round (`scripts/run_benchmark.py`, `docs/RESEARCH_PLAN.md`). Do not run the nested search unless explicitly asked.
+- Experiment B: design only (`scripts/run_benchmark.py`, `docs/RESEARCH_PLAN.md`). Do not run the nested search unless explicitly asked. Comparisons are `b_lr` and `b_select`, not an outer-score winner.
+- Dataset correspondence: `scripts/compare_dataset_candidate.py`. Content match ≠ provenance of labels or population.
 - Do not invent data provenance, label-generation, or ethics facts. See `docs/DATA_PROVENANCE.md` and `RESEARCH_TODO.md`. Column-name similarity is not file identity.
 - Prefer `uv sync --extra dev --extra benchmark` for locked environments. CI uses `uv sync --frozen --extra dev`.
 - Do not auto commit or push unless the user asks.

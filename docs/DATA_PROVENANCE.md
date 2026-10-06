@@ -20,7 +20,7 @@ Public copies often use the filename `StressLevelDataset.csv` and the same 21 co
 | Item | Status | Known facts | Evidence | Unconfirmed | If this evidence is missing, cannot claim | Next check |
 |------|--------|-------------|----------|-------------|-------------------------------------------|------------|
 | Author / publisher of *this* CSV | unknown | This repo has no LICENSE, CITATION, or author file | Repository tree | Whether Kaggle user `rxnach` published this exact file | Authorship or permission | Download a candidate dump; compare LF-normalized SHA-256 and row counts |
-| Candidate listing (same schema family) | candidate | Kaggle page title “Student Stress Factors: A Comprehensive Analysis” (user `rxnach`) describes ~20 features with the same names as this header, including `stress_level` | https://www.kaggle.com/datasets/rxnach/student-stress-factors-a-comprehensive-analysis (search snippets; direct fetch of the page returned 404 from this environment) | Row count of the Kaggle file; license; whether it equals this 1121-row object | That published 1100-row analyses evaluated *this* file | Manual download; hash; do not merge by filename |
+| Candidate listing (same schema family) | candidate | Kaggle page title “Student Stress Factors: A Comprehensive Analysis” (URL user `rxnach`; page display name Chhabii). Column names overlap this header. Listing states **Apache 2.0**. Direct page fetch succeeded on 2026-10-06; the Download control sits behind Sign In | https://www.kaggle.com/datasets/rxnach/student-stress-factors-a-comprehensive-analysis | Row count of the Kaggle file; whether it equals this 1121-row object or its first 1100 rows | That published 1100-row analyses evaluated *this* file | User-provided CSV path; `scripts/compare_dataset_candidate.py`; do not merge by filename |
 | Candidate paper (same filename, 1100 rows) | candidate | Springer *Discover Artificial Intelligence* article “Comprehensive analysis of stress factors affecting students: a machine learning approach” (2024) discusses a `StressLevelDataset.csv` of 1100 students and points to a GitHub copy | https://link.springer.com/article/10.1007/s44163-024-00169-6 | Whether that 1100-row table is a prefix, a subset, or unrelated to this 1121-row file | That this audit replicates that paper | Hash comparison against the paper’s linked file |
 | Non-match (do not cite as source) | known as different schema | Kaggle `samyakb/student-stress-factors` is a small Google-Forms table (on the order of tens of rows, a handful of 1–5 ratings such as sleep / headaches / study load). Apache 2.0 is claimed on that listing | https://www.kaggle.com/datasets/samyakb/student-stress-factors | — | — | Do not treat a shared phrase “student stress factors” as identity |
 | Version | unknown | — | — | Dataset version on Kaggle vs this CSV | Reproducible citation of a public dump | Record version/date of any matching dump |
@@ -53,10 +53,17 @@ Public copies often use the filename `StressLevelDataset.csv` and the same 21 co
 
 They are scores for **predicting the `stress_level` column already stored in this CSV** under the audit protocol. They are not a measurement of “true stress,” a diagnosis, or a claim about a named public dataset until hashes and a codebook match.
 
-## Manual follow-up (not done in this pass)
+## Manual follow-up
 
-1. Download the `rxnach` Kaggle CSV (this environment could not open the Kaggle page).
-2. LF-normalize and SHA-256 it; also hash the first 1100 data rows of this repo file separately.
-3. If hashes differ, stop treating public 1100-row papers as evaluations of this file.
-4. If hashes match a prefix, document the extra 21 rows as an unexplained suffix — still not a reason to include them in primary without a codebook.
-5. Record license and version from the matching dump only after a hash match.
+Whole-file SHA-256 mismatch between a 1100-row download and this 1121-row file does **not** by itself prove the files are unrelated. Use:
+
+```bash
+python scripts/compare_dataset_candidate.py --candidate PATH/TO/candidate.csv --prefix-rows 1100 --out-dir /tmp/dataset_compare
+```
+
+A prefix or order-insensitive match still only supports **file content** correspondence, not sampling frame, label generation, or ethics.
+
+1. Obtain the `rxnach` Kaggle CSV (login/terms may be required; this environment does not use account credentials).
+2. Run the layered comparison (full file and prefix 1100).
+3. If only a prefix matches, document the extra 21 rows as unexplained suffix — still not a reason to include them in primary without a codebook.
+4. Record license and version from a matching dump only after a documented content match.

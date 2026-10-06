@@ -201,7 +201,15 @@ A run on commit `066ea2b` with uncommitted changes (`dirty: true`, correctly rec
 
 ## Experiment B (design only)
 
-`scripts/run_benchmark.py <empty_out_dir>` writes `benchmark_status.json` (`status: design_only_not_executed`). It does **not** run nested search. Search space, fit budget, and pre-specified comparisons: `docs/RESEARCH_PLAN.md` and `src/stress_detection/experiment_b.py`.
+`scripts/run_benchmark.py <empty_out_dir>` writes `benchmark_status.json` (`status: design_only_not_executed`). It does **not** run nested search.
+
+Pre-specified comparisons: `b_lr` vs dummy, nested-single, and A `lr_all`; `b_select` vs A `lr_all`. `b_select` chooses family and hyperparameters on inner data only. Fit budget: **2100 inner + 150 family refits = 2250**, not “2250 inner fits.” Details: `docs/RESEARCH_PLAN.md` and `src/stress_detection/experiment_b.py`.
+
+## Dataset candidate comparison
+
+```bash
+python scripts/compare_dataset_candidate.py --candidate PATH/TO/candidate.csv --prefix-rows 1100 --out-dir /tmp/dataset_compare
+```
 
 ## 3-class protocol
 
@@ -217,7 +225,7 @@ python -m jupyter nbconvert --to notebook --execute "Stress Level Classification
 
 ## Roadmap (not done)
 
-- Hash comparison of this CSV against candidate public dumps (`docs/DATA_PROVENANCE.md`).
+- Hash comparison of this CSV against candidate public dumps via `scripts/compare_dataset_candidate.py` (`docs/DATA_PROVENANCE.md`). Whole-file hash mismatch does not rule out a 1100-row prefix match.
 - Execute Experiment B as specified (`docs/RESEARCH_PLAN.md`); do not expand the model set by default.
 - Optional formal sensitivity full runs into **new** directories.
 - Explanation stability, learning curves, external validation only after codebook-level comparability.

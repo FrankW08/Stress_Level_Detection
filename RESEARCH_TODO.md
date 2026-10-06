@@ -19,9 +19,9 @@ The structured provenance checklist is `docs/DATA_PROVENANCE.md`. The next-stage
 
 - Removing label-driven zero mapping stops that **implementation** leak. It does not prove the CSV label is independent of the inputs.
 - Persistent-error flags and same-data tree descriptions are descriptive of this table, not a diagnosis.
-- Experiment B nested search is specified in `docs/RESEARCH_PLAN.md` and `src/stress_detection/experiment_b.py`; `scripts/run_benchmark.py` only writes the design JSON.
+- Experiment B nested search is specified in `docs/RESEARCH_PLAN.md` and `src/stress_detection/experiment_b.py`; `scripts/run_benchmark.py` only writes the design JSON. The four pre-specified pairs use `b_lr` and `b_select` (not an outer-score winner).
 - No external validation has been run.
-- GitHub Actions is defined in `.github/workflows/ci.yml`; a remote run is not implied by adding the workflow file.
+- GitHub Actions on `main` at `b769e6b` completed successfully (run 37516150242). Later local edits are not covered by that run until they are pushed.
 
 ## Not in scope of the current engineering audit
 
