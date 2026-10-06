@@ -129,6 +129,33 @@ Two summaries are reported; both are legitimate, they answer different questions
 - Confusion matrices summed over repeats count each sample once per repeat (10× in total); that total is not a number of independent samples.
 - Paired model comparisons (`paired`) use per-fold paired differences with a Nadeau–Bengio-style corrected variance and df = 49. The result is an **approximate corrected interval**, not an exact one. An interval that contains 0 means the difference is not resolved under this protocol; it does **not** show the models are equivalent.
 
+## Formal full audit (`results/audit_full_d12aa67_clean`)
+
+Run from a clean working tree at commit `d12aa67` (`git.dirty: false`, `git_state_capture: "run_start"`), seed=0, 5 folds × 10 repeats from `configs/audit_primary.yaml`, 100 permutations, 1098 primary-scope rows. Fold-level metrics, OOF predictions, fold membership, exclusions, inner candidates and permutations are identical to `results/audit_full`.
+
+| Model | fold-level macro-F1 (50 folds) | repeat-level macro-F1 (10 repeats) | repeat-level accuracy | repeat-level 0↔2 error rate |
+|-------|------|------|------|------|
+| Dummy (most frequent) | 0.169 ± 0.001 | 0.169 ± 0.000 | 0.340 ± 0.000 | 0.496 ± 0.000 |
+| LR, all features | 0.886 ± 0.017 | 0.886 ± 0.003 | 0.885 ± 0.003 | 0.074 ± 0.004 |
+| LR, no 4 psych features | 0.883 ± 0.019 | 0.883 ± 0.003 | 0.883 ± 0.003 | 0.078 ± 0.004 |
+| Linear SVM, C=0.2 | 0.878 ± 0.017 | 0.878 ± 0.004 | 0.878 ± 0.004 | 0.082 ± 0.006 |
+| Random Forest | 0.878 ± 0.020 | 0.878 ± 0.006 | 0.878 ± 0.006 | 0.077 ± 0.006 |
+| Nested single-feature tree (depth 3) | 0.872 ± 0.020 | 0.872 ± 0.006 | 0.870 ± 0.006 | 0.094 ± 0.009 |
+
+Values are mean ± std (ddof=1); see "How metrics are aggregated" for what each std does and does not mean. The 0↔2 rate denominator is the number of samples with true label 0 or 2.
+
+Paired macro-F1 differences (approximate corrected 95% intervals, df = 49):
+
+| Comparison | mean difference | interval |
+|---|---|---|
+| LR all − nested single-feature tree | 0.0131 | [−0.0017, 0.0280] |
+| LR all − Random Forest | 0.0077 | [−0.0064, 0.0217] |
+| LR all − LR without psych features | 0.0026 | [−0.0085, 0.0138] |
+
+All three intervals contain 0: the differences are not resolved under this protocol, which does not mean the models are equivalent.
+
+Permutation check (linear SVM, one 5-fold CV, macro-F1): with the clean pipeline the observed score is 0.877 against a label-permutation null of 0.320 ± 0.020 (max 0.372). The audit-only label-driven zero-map counterexample scores 0.932, which illustrates the leakage this repository removed; it is not a valid result.
+
 ## Historical full audit (`results/audit_full`)
 
 The committed tree under `results/audit_full/` is **historical evidence** produced from git commit `cd80fc1` with a **dirty** working tree (pre-`5ee2152` packaging). Do **not** treat its `env.script_sha256` as a full code manifest. It predates `repeat_scores.csv` / `models_repeat`.
@@ -144,22 +171,9 @@ Fold-level macro-F1 (mean ± std over 50 outer folds, seed=0):
 | LR, no 4 psych features | 0.883 ± 0.019 |
 | Nested single-feature tree (depth 3) | 0.872 ± 0.020 |
 
-## Verification run with repeat-level summary (not versioned)
+## Earlier verification run (not versioned)
 
-Same protocol (seed=0, 5 folds × 10 repeats, 100 permutations), run on commit `066ea2b` with **uncommitted** changes at run start (`dirty: true`, correctly recorded). It was briefly committed as `results/audit_full_066ea2b_dirty_repeatlevel` in `314c444` and has since been moved out of the repository as a local verification artifact, because a dirty run is not a formal result. Fold-level metrics, paired differences, permutation results, OOF predictions, fold membership and included rows are identical to `results/audit_full`.
-
-Repeat-level pooled OOF metrics (mean ± std over 10 repeats):
-
-| Model | macro-F1 | accuracy | 0↔2 error rate |
-|-------|----------|----------|----------------|
-| Dummy (most frequent) | 0.169 ± 0.000 | 0.340 ± 0.000 | 0.496 ± 0.000 |
-| LR, all features | 0.886 ± 0.003 | 0.885 ± 0.003 | 0.074 ± 0.004 |
-| Linear SVM, C=0.2 | 0.878 ± 0.004 | 0.878 ± 0.004 | 0.082 ± 0.006 |
-| Random Forest | 0.878 ± 0.006 | 0.878 ± 0.006 | 0.077 ± 0.006 |
-| LR, no 4 psych features | 0.883 ± 0.003 | 0.883 ± 0.003 | 0.078 ± 0.004 |
-| Nested single-feature tree (depth 3) | 0.872 ± 0.006 | 0.870 ± 0.006 | 0.094 ± 0.009 |
-
-The 0↔2 rate denominator is the number of samples with true label 0 or 2. A formal result should be regenerated from a clean commit (command below).
+A run on commit `066ea2b` with uncommitted changes (`dirty: true`, correctly recorded) was briefly committed as `results/audit_full_066ea2b_dirty_repeatlevel` in `314c444` and later moved out of the repository, because a dirty run is not a formal result. Its fold- and repeat-level results are identical to the formal run above.
 
 ## Leakage controls
 
@@ -179,5 +193,4 @@ python -m jupyter nbconvert --to notebook --execute "Stress Level Classification
 
 - Source-file lineage / label generation audit.
 - Full Experiment B nested search.
-- Clean-commit full audit regeneration into a new `results/` folder.
 - Explanation stability, learning curves, external validation.
