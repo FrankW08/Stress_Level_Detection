@@ -9,6 +9,7 @@ The structured provenance checklist is `docs/DATA_PROVENANCE.md`. The next-stage
 | Question | Evidence that would be needed | What we cannot conclude without it |
 |----------|-------------------------------|------------------------------------|
 | How was `stress_level` produced? | Instrument, codebook, or generation script that maps fields → label | That models are predicting an independent outcome rather than reconstructing a derived label |
+| Why does `blood_pressure` nearly recode `stress_level`? (codes 1 and 2 each occur with one label only; see the label-proxy check in `README.md`) | The instrument or generation procedure for both fields | Whether any model result reflects stress rather than a reconstruction of how the CSV was built |
 | What is the original source file and lineage? | Provenance of `StressLevelDataset_original.csv` (export, scrape, or study dump), including a hash match to a public dump | That the 1121 rows are a well-defined sample from a stated population, or that they are the commonly cited 1100-row `StressLevelDataset.csv` |
 | Are rows distinct people? | Subject IDs, timestamps, or a duplicate-respondent protocol | That `grouped_duplicates` is a subject-level split rather than an identical-feature split |
 | Why are rows 1100–1120 different / excluded in primary? | Collection notes or a documented population rule | That the 0–1099 cut is anything more than an audit convention; that the extra rows are the only difference vs public 1100-row copies |
