@@ -199,7 +199,7 @@ The six strong single fields (from the audit's `single_feature_exploratory`) are
 - `blood_pressure` should not be read as a physiological measurement or as evidence that blood pressure predicts stress.
 - This is descriptive. It does not establish how `stress_level` was produced (derived from inputs, synthetic generation, or a coding convention); see `RESEARCH_TODO.md`.
 
-The exploratory output is `results/label_proxy_check_2026-10-19/` (`report.json`, `blood_pressure_by_label.csv`, `feature_label_purity.csv`). It was run on top of `91132de` with uncommitted changes (`git.dirty: true` in `report.json`), so it is not a formal clean run; rerun into a new directory from a clean tree after committing the script.
+The output is `results/label_proxy_check_bf53bf6_clean/` (`report.json`, `blood_pressure_by_label.csv`, `feature_label_purity.csv`), run from a clean working tree at commit `bf53bf6` (`git.dirty: false` in `report.json`). An earlier run of the same code with uncommitted changes gave identical scores and crosstab; as with other dirty runs, it is kept outside the repository rather than committed.
 
 ## Historical full audit (`results/audit_full`)
 
