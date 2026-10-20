@@ -174,6 +174,33 @@ All three intervals contain 0: the differences are not resolved under this proto
 
 Permutation check (linear SVM, one 5-fold CV, macro-F1): with the clean pipeline the observed score is 0.877 against a label-permutation null of 0.320 ± 0.020 (max 0.372). The audit-only label-driven zero-map counterexample scores 0.932, which illustrates the leakage this repository removed; it is not a valid result.
 
+## Label-proxy check (`scripts/run_label_proxy_check.py`)
+
+The audit shows that many single fields score almost as well as every model. `scripts/run_label_proxy_check.py` makes that explicit with the same 5×10 RepeatedStratifiedKFold splits (seed 0) and repeat-level pooled-OOF aggregation, so its `lr_all` reproduces the audit's 0.886.
+
+`blood_pressure` (3 codes) is close to a recoding of `stress_level` in the primary scope (3 rows have no code):
+
+| blood_pressure | label 0 | label 1 | label 2 |
+|---|---|---|---|
+| 1 | 0 | 299 | 0 |
+| 2 | 298 | 0 | 0 |
+| 3 | 73 | 58 | 367 |
+
+| Logistic regression inputs | features | repeat-level macro-F1 |
+|---|---|---|
+| all fields | 20 | 0.886 ± 0.003 |
+| `blood_pressure` only | 1 | 0.883 ± 0.000 |
+| all except `blood_pressure` | 19 | 0.873 ± 0.003 |
+| all except the six fields that each score ≥ 0.85 alone | 14 | 0.875 ± 0.004 |
+
+The six strong single fields (from the audit's `single_feature_exploratory`) are `blood_pressure`, `future_career_concerns`, `depression`, `anxiety_level`, `sleep_quality` and `bullying`; mean absolute correlation among all 20 fields is 0.57. Dropping `blood_pressure`, or all six together, leaves the score essentially unchanged, so the label signal is spread redundantly across the table. Consequences:
+
+- Model comparisons on this CSV are near a shared ceiling (~0.87–0.89); they do not show that one model learns more about stress.
+- `blood_pressure` should not be read as a physiological measurement or as evidence that blood pressure predicts stress.
+- This is descriptive. It does not establish how `stress_level` was produced (derived from inputs, synthetic generation, or a coding convention); see `RESEARCH_TODO.md`.
+
+The output is `results/label_proxy_check_bf53bf6_clean/` (`report.json`, `blood_pressure_by_label.csv`, `feature_label_purity.csv`), run from a clean working tree at commit `bf53bf6` (`git.dirty: false` in `report.json`). An earlier run of the same code with uncommitted changes gave identical scores and crosstab; as with other dirty runs, it is kept outside the repository rather than committed.
+
 ## Historical full audit (`results/audit_full`)
 
 The committed tree under `results/audit_full/` is **historical evidence** produced from git commit `cd80fc1` with a **dirty** working tree (pre-`5ee2152` packaging). Do **not** treat its `env.script_sha256` as a full code manifest. It predates `repeat_scores.csv` / `models_repeat`.

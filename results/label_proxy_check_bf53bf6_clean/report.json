@@ -1,0 +1,58 @@
+{
+  "proxy_feature": "blood_pressure",
+  "strong_single_features": [
+    "blood_pressure",
+    "future_career_concerns",
+    "depression",
+    "anxiety_level",
+    "sleep_quality",
+    "bullying"
+  ],
+  "mean_abs_feature_correlation": 0.5671305828804293,
+  "lr_variants": {
+    "lr_all": {
+      "n_features": 20,
+      "mean": 0.885624926534726,
+      "std": 0.0030626499879394297
+    },
+    "lr_blood_pressure_only": {
+      "n_features": 1,
+      "mean": 0.8829868325101025,
+      "std": 0.0
+    },
+    "lr_without_blood_pressure": {
+      "n_features": 19,
+      "mean": 0.8733925477715889,
+      "std": 0.003426155350784468
+    },
+    "lr_without_strong_single_features": {
+      "n_features": 14,
+      "mean": 0.8752762177050251,
+      "std": 0.003942973725866878
+    }
+  },
+  "protocol": {
+    "n_splits": 5,
+    "n_repeats": 10,
+    "seed": 0,
+    "scoring": "f1_macro"
+  },
+  "rows": 1098,
+  "scope": "primary",
+  "csv_sha256_normalized_lf": "05145e0a27395e85f6ed062d6f89f99351bdd16f8fa7dc5e60243bd1083dab26",
+  "git": {
+    "commit": "bf53bf6be5dd8a4e879e906a31b8419f634db7cb",
+    "dirty": false
+  },
+  "audit_results": "results\\audit_full_4865bb3_clean\\results.json",
+  "strong_threshold": 0.85,
+  "single_feature_exploratory_from_audit": {
+    "blood_pressure": 0.8811299268606716,
+    "future_career_concerns": 0.8779786024445193,
+    "depression": 0.8763130183948384,
+    "anxiety_level": 0.8753892872007155,
+    "sleep_quality": 0.8741894009886318,
+    "bullying": 0.8709689053082063
+  },
+  "interpretation": "Descriptive. A near-deterministic feature-label table means the label is reproducible from that field in this CSV; it does not establish how the label was produced."
+}

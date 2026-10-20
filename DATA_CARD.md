@@ -38,7 +38,7 @@ Most Likert-style items use **0–5** unless noted. Zero means the lowest catego
 | self_esteem | scale | provisional max 30 |
 | mental_health_history | binary | 0/1 |
 | depression | scale | provisional max 27 |
-| blood_pressure | ordinal / categorical encoding | **non-monotonic** relation to stress; do not treat as mmHg |
+| blood_pressure | ordinal / categorical encoding | **non-monotonic** relation to stress; do not treat as mmHg. In the primary scope code 1 occurs only with label 1 and code 2 only with label 0 (label-proxy check) |
 | social_support | ordinal | provisional max 3 |
 | headache, sleep_quality, … | Likert 0–5 | encoding is experimental config |
 
